@@ -30,3 +30,19 @@ Then:
 git add .gitignore README.md
 git commit -m "Update project documentation and gitignore"
 git push origin main
+
+## Run the crawler
+
+The crawler reads the initial list of DIEM URLs from:
+data/urls.txt
+
+and downloads the corresponding HTML pages into:
+data/raw/
+
+It also generates:
+data/metadata.json
+
+Run it with:
+python src/crawler.py
+
+Generated files such as data/raw/ and data/metadata.json are ignored by Git.
