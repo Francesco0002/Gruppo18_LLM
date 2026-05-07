@@ -1,6 +1,12 @@
+# Pagine principali DIEM
 https://www.diem.unisa.it/
 https://www.diem.unisa.it/dipartimento
 https://www.diem.unisa.it/didattica
 https://www.diem.unisa.it/ricerca
 https://www.diem.unisa.it/terza-missione
 https://www.diem.unisa.it/international
+
+# Pagine utili per recuperare docenti e corsi
+https://www.diem.unisa.it/dipartimento/personale
+https://www.diem.unisa.it/didattica/offerta-formativa
+https://www.diem.unisa.it/dipartimento/strutture
