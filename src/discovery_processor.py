@@ -158,20 +158,6 @@ async def process_item(
     context = filter_context(item.url)
     additional_visited = [final_url] if final_url != item.url else []
 
-    if final_url in seen_documents:
-        record = make_record(
-            item,
-            "html",
-            "duplicate_redirect",
-            final_url=final_url,
-            document_url=final_url,
-            content_type=candidate.content_type,
-            mime=candidate.mime,
-            duplicate_of=final_url,
-            raw_path=None,
-        )
-        return processed_item(record, additional_visited=additional_visited)
-
     ok_final, final_reason = can_traverse_url(final_url, config, context)
     if not ok_final:
         record = make_record(
@@ -183,6 +169,20 @@ async def process_item(
             content_type=candidate.content_type,
             mime=candidate.mime,
             skip_reason=final_reason,
+            raw_path=None,
+        )
+        return processed_item(record, additional_visited=additional_visited)
+
+    if final_url in seen_documents:
+        record = make_record(
+            item,
+            "html",
+            "duplicate_redirect",
+            final_url=final_url,
+            document_url=final_url,
+            content_type=candidate.content_type,
+            mime=candidate.mime,
+            duplicate_of=final_url,
             raw_path=None,
         )
         return processed_item(record, additional_visited=additional_visited)
@@ -224,6 +224,26 @@ async def process_item(
         config,
         context,
     )
+    if document_url not in (item.url, final_url):
+        additional_visited.append(document_url)
+
+    if document_url in seen_documents:
+        record = make_record(
+            item,
+            "html",
+            "duplicate_canonical",
+            final_url=final_url,
+            canonical_url=canonical_url,
+            document_url=document_url,
+            indexable=False,
+            duplicate_of=document_url,
+            raw_path=None,
+            content_type=candidate.content_type,
+            mime=candidate.mime,
+            canonical_skip_reason=canonical_skip_reason,
+        )
+        return processed_item(record, additional_visited=additional_visited)
+
     all_links = extract_links_from_soup(soup, final_url, config)
     links, pdf_links = split_document_links(all_links)
     linked_pdf_records = await make_linked_pdf_records(
@@ -234,9 +254,6 @@ async def process_item(
     )
     indexable, index_reason = can_index_url(document_url, config, context)
     status = "ok" if indexable else "not_indexable"
-
-    if document_url not in (item.url, final_url):
-        additional_visited.append(document_url)
 
     record = make_record(
         item,

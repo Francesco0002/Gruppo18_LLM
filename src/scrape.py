@@ -263,7 +263,7 @@ async def run_scrape() -> dict:
     try:
         for batch_index, batch in enumerate(chunked(records, BATCH_SIZE), start=0):
             output_records: list[dict] = []
-            for offset, record in enumerate(batch, start=1):
+            for offset, record in enumerate(batch, start=0):
                 index = batch_index * BATCH_SIZE + offset
                 processed = await process_html_record(record, index, crawler, run_config, config)
                 output_records.append(processed)

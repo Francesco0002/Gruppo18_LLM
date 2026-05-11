@@ -95,20 +95,24 @@ def download_pdf(record: dict, config: dict, client: httpx.Client) -> dict:
             }
 
         downloaded = 0
+        too_large = False
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("wb") as file:
             for chunk in response.iter_bytes():
                 downloaded += len(chunk)
                 if downloaded > MAX_PDF_BYTES:
-                    file.close()
-                    output_path.unlink(missing_ok=True)
-                    return {
-                        "record": record,
-                        "status": "too_large",
-                        "content_length": downloaded,
-                        "raw_pdf_path": None,
-                    }
+                    too_large = True
+                    break
                 file.write(chunk)
+
+        if too_large:
+            output_path.unlink(missing_ok=True)
+            return {
+                "record": record,
+                "status": "too_large",
+                "content_length": downloaded,
+                "raw_pdf_path": None,
+            }
 
     return {
         "record": record,
@@ -142,7 +146,11 @@ def build_manifest_record(
             "source": "pdf",
             "status": "too_large",
             "url": record["url"],
+            "document_url": record.get("document_url", record["url"]),
             "hash": record["hash"],
+            "content_hash": None,
+            "markdown_path": None,
+            "raw_pdf_path": download.get("raw_pdf_path"),
             "content_length": download.get("content_length"),
             "last_crawled": crawled_at,
             "text_extracted": False,
@@ -153,14 +161,19 @@ def build_manifest_record(
             "source": "pdf",
             "status": "failed",
             "url": record["url"],
+            "document_url": record.get("document_url", record["url"]),
             "hash": record["hash"],
+            "content_hash": None,
+            "markdown_path": None,
             "raw_pdf_path": download.get("raw_pdf_path"),
             "last_crawled": crawled_at,
             "text_extracted": False,
             "error": error,
         }
 
-    assert config is not None
+    if config is None:
+        raise ValueError("config è richiesto per salvare il Markdown PDF.")
+
     output_path = markdown_path(record["hash"], config)
     markdown_output = write_text(output_path, markdown)
     text_extracted = len(markdown.strip()) >= 100
@@ -211,16 +224,10 @@ def run_extract_pdf() -> dict:
                 manifest_records.append(build_manifest_record(download))
             else:
                 manifest_records.append(
-                    {
-                        "source": "pdf",
-                        "status": "failed",
-                        "url": record["url"],
-                        "hash": record["hash"],
-                        "raw_pdf_path": None,
-                        "last_crawled": now_iso(),
-                        "text_extracted": False,
-                        "error": download.get("error", "download failed"),
-                    }
+                    build_manifest_record(
+                        download,
+                        error=download.get("error", "download failed"),
+                    )
                 )
 
     if downloads:

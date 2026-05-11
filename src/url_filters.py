@@ -20,7 +20,7 @@ Tabella delle regole principali:
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import parse_qsl, urldefrag, urlparse
+from urllib.parse import parse_qsl, urlencode, urldefrag, urlparse
 
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
@@ -119,10 +119,14 @@ def normalize_url(url: str) -> str:
     if path != "/" and path.endswith("/"):
         path = path[:-1]
 
+    query_params = sorted(parse_qsl(parsed.query, keep_blank_values=True))
+    query = urlencode(query_params)
+
     return parsed._replace(
         scheme="https",
         netloc=parsed.netloc.lower(),
         path=path,
+        query=query,
     ).geturl()
 
 
@@ -224,8 +228,17 @@ def source_url_from_context(context: dict | None) -> str | None:
 
 def first_path_segment(url: str) -> str:
     """Primo segmento del path."""
-    path = urlparse(url).path.strip("/")
-    return path.split("/", 1)[0].lower() if path else ""
+    segments = path_segments(url)
+    return segments[0] if segments else ""
+
+
+def path_segments(url: str) -> list[str]:
+    """Segmenti del path normalizzati in minuscolo."""
+    return [
+        segment.lower()
+        for segment in urlparse(url).path.split("/")
+        if segment
+    ]
 
 
 def is_diem_url(url: str, config: dict) -> bool:
@@ -252,9 +265,9 @@ def course_has_allowed_identifier(url: str, config: dict) -> bool:
         str(code).lower()
         for code in config_list(config, "scope", "allowed_course_codes")
     }
-    path = urlparse(url).path.lower()
-    return first_path_segment(url) in allowed_course_paths or any(
-        code in path for code in allowed_codes
+    segments = path_segments(url)
+    return first_path_segment(url) in allowed_course_paths or bool(
+        set(segments) & allowed_codes
     )
 
 

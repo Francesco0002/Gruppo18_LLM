@@ -238,4 +238,8 @@ logs/
 # membro del gruppo crea il proprio config.yaml a partire dal template.
 /config.yaml
 
+# File di test
+tests/test_bugfixes.py
+
+
 

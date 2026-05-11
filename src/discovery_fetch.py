@@ -27,6 +27,7 @@ from url_filters import can_traverse_url, normalize_url, parse_mime
 
 
 HTML_MIMES = {"text/html", "application/xhtml+xml"}
+DEFAULT_MAX_SITEMAPS = 20
 
 
 class DomainRateLimiter:
@@ -182,8 +183,9 @@ async def fetch_sitemap_urls(
     )
     seen_sitemaps: set[str] = set()
     found_urls: list[str] = []
+    max_sitemaps = int(config["crawler"].get("max_sitemaps", DEFAULT_MAX_SITEMAPS))
 
-    while sitemap_queue and len(seen_sitemaps) < 20:
+    while sitemap_queue and len(seen_sitemaps) < max_sitemaps:
         sitemap_url = sitemap_queue.popleft()
         if sitemap_url in seen_sitemaps:
             continue

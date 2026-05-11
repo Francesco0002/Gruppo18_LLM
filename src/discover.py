@@ -69,6 +69,18 @@ def can_visit(item: CrawlItem, state: CrawlState, config: dict) -> bool:
     return len(state.visited) < config["crawler"]["max_total_urls"]
 
 
+def mark_visited(state: CrawlState, url: str) -> bool:
+    """Marca un URL visitato e aggiorna il contatore del suo dominio."""
+    if url in state.visited:
+        return False
+
+    state.visited.add(url)
+    domain = urlparse(url).netloc
+    if domain:
+        state.domain_counts[domain] += 1
+    return True
+
+
 def take_batch(state: CrawlState, config: dict) -> list[CrawlItem]:
     """Prende dalla coda un batch di URL validi da scaricare."""
     batch: list[CrawlItem] = []
@@ -84,8 +96,7 @@ def take_batch(state: CrawlState, config: dict) -> list[CrawlItem]:
         if not can_visit(item, state, config):
             continue
 
-        state.visited.add(item.url)
-        state.domain_counts[urlparse(item.url).netloc] += 1
+        mark_visited(state, item.url)
         batch.append(item)
 
     return batch
@@ -176,8 +187,9 @@ async def run_discovery(config: dict) -> dict:
                     record = processed.record
 
                     for extra in processed.additional_visited:
-                        state.visited.add(extra)
+                        mark_visited(state, extra)
 
+                    expand_links = True
                     if record["type"] == "html" and record["indexable"]:
                         document_url = record["document_url"]
                         if document_url in state.seen_documents:
@@ -185,6 +197,7 @@ async def run_discovery(config: dict) -> dict:
                             record["indexable"] = False
                             record["duplicate_of"] = document_url
                             record["raw_path"] = None
+                            expand_links = False
                         else:
                             state.seen_documents.add(document_url)
                             record["raw_path"] = save_html(document_url, processed.html or "", config)
@@ -193,13 +206,14 @@ async def run_discovery(config: dict) -> dict:
                     if record["type"] == "pdf":
                         recorded_pdf_urls.add(record["url"])
 
-                    for pdf_record in processed.linked_pdf_records:
-                        if pdf_record["url"] in recorded_pdf_urls:
-                            continue
-                        write_record(output_file, pdf_record, status_counts, type_counts)
-                        recorded_pdf_urls.add(pdf_record["url"])
+                    if expand_links:
+                        for pdf_record in processed.linked_pdf_records:
+                            if pdf_record["url"] in recorded_pdf_urls:
+                                continue
+                            write_record(output_file, pdf_record, status_counts, type_counts)
+                            recorded_pdf_urls.add(pdf_record["url"])
 
-                    enqueue_links(item, processed.traversal_links, state, config)
+                        enqueue_links(item, processed.traversal_links, state, config)
 
                 save_checkpoint(state, config, completed=False)
                 current_progress = min(len(state.visited), max_total_urls)
