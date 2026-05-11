@@ -1,0 +1,99 @@
+# Template di configurazione per la fase di discovery.
+# Per usarlo: copia questo file in `config.yaml` e adatta i valori.
+#
+#   cp config.example.yaml config.yaml
+#
+# Lo script src/discover.py legge SOLO config.yaml. Le modifiche locali
+# non devono finire in git.
+
+crawler:
+  # User-Agent identificativo. Aggiornare l'email di contatto.
+  user_agent: "DIEM-Chatbot-Project/1.0 (+contact: studente@studenti.unisa.it)"
+
+  # Domini da cui è permesso attraversare/indicizzare HTML.
+  # Lo scope DIEM (sezione 'scope') filtra ulteriormente docenti.unisa.it
+  # e corsi.unisa.it.
+  allowed_domains:
+    - www.diem.unisa.it
+    - docenti.unisa.it
+    - corsi.unisa.it
+
+  # Domini in cui è permesso scoprire (e in seguito scaricare) PDF.
+  pdf_allowed_domains:
+    - www.diem.unisa.it
+    - docenti.unisa.it
+    - corsi.unisa.it
+    - www.unisa.it
+    - web.unisa.it
+
+  # Limiti totali del crawl. Per un crawl completo aumentare, ad esempio
+  # max_total_urls: 6000 e max_depth: 4.
+  max_total_urls: 200
+  max_depth: 2
+
+  # Limiti per dominio. Un dominio non elencato qui ha limite implicito 0
+  # e viene quindi escluso dal crawl, anche se è in allowed_domains.
+  per_domain_limits:
+    www.diem.unisa.it: 100
+    docenti.unisa.it: 75
+    corsi.unisa.it: 75
+    www.unisa.it: 50
+    web.unisa.it: 50
+
+  # Parametri di rete e cortesia.
+  timeout: 20
+  max_concurrent_requests: 5
+  rate_limit_per_domain_rps: 2
+  respect_robots_txt: true
+  use_sitemap: true
+
+  # Limite massimo (in byte) per il salvataggio dell'HTML.
+  # Le pagine più grandi vengono ignorate con status="too_large".
+  max_html_bytes: 5000000
+
+scope:
+  # Domini gestiti come "DIEM-aware".
+  diem_domain: www.diem.unisa.it
+  teacher_domain: docenti.unisa.it
+  course_domain: corsi.unisa.it
+
+  # Slug ammessi per corsi.unisa.it/<slug>/...
+  # Solo i corsi DIEM elencati qui vengono attraversati: niente match
+  # generici sul primo segmento numerico (regola stretta).
+  allowed_course_slugs:
+    - ingegneria-dell-informazione-per-la-medicina-digitale
+    - ingegneria-informatica
+    - electrical-engineering-for-digital-energy
+    - information-engineering-for-digital-medicine
+    - ingegneria-informatica-magistrale
+    - ingegneria-dell-informazione
+    - photovoltaics
+
+  # Codici corso DIEM riconosciuti nel path (oltre agli slug).
+  # Quotare i codici puramente numerici per evitare che YAML li
+  # interpreti come integer.
+  allowed_course_codes:
+    - IE128L-8
+    - IE127L-8
+    - IE233LM-28
+    - IE232LM-32
+    - IE227LM-32
+    - "88605"
+    - "88608"
+    - 06128L-8
+    - 06127L-8
+    - 06233LM-28
+    - 06232LM-32
+    - 06227LM-32
+
+paths:
+  # Path relativi alla root del progetto.
+  urls_seed: "data/urls.txt"
+  raw_html_dir: "data/raw_html"
+  raw_pdf_dir: "data/raw_pdf"
+  discovered_urls_file: "data/discovered_urls.jsonl"
+  checkpoint_file: "data/checkpoint.json"
+  processed_markdown_dir: "data/processed/markdown"
+  processed_raw_markdown_dir: "data/processed/markdown_raw"
+  processed_manifest_file: "data/processed/manifest.jsonl"
+  processed_stats_file: "data/processed/stats.json"

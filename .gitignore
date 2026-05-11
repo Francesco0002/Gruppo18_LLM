@@ -217,6 +217,25 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Project data
+# Project data (vecchia pipeline del crawler.py iniziale)
 data/raw/
 data/metadata.json
+
+# Nuova pipeline di ingestion (discover + scrape + extract_pdf)
+data/raw_html/
+data/raw_pdf/
+data/processed/
+data/discovered_urls.jsonl
+data/checkpoint.json
+
+# Log della pipeline
+logs/
+
+# Crawl4AI local storage
+.crawl4ai/
+
+# Configurazione locale: in git va solo config.example.yaml; ogni
+# membro del gruppo crea il proprio config.yaml a partire dal template.
+/config.yaml
+
+
