@@ -93,6 +93,7 @@ paths:
   raw_pdf_dir: "data/raw_pdf"
   discovered_urls_file: "data/discovered_urls.jsonl"
   checkpoint_file: "data/checkpoint.json"
+  processed_raw_markdown_dir: "data/processed/raw_markdown"
   processed_markdown_dir: "data/processed/markdown"
   processed_manifest_file: "data/processed/manifest.jsonl"
   processed_stats_file: "data/processed/stats.json"

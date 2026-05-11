@@ -6,6 +6,7 @@ Input:
 
 Output:
 - data/raw_pdf/<sh>/<hash>.pdf
+- data/processed/raw_markdown/<sh>/<hash>.md
 - data/processed/markdown/<sh>/<hash>.md
 - data/processed/manifest.jsonl
 """
@@ -19,6 +20,7 @@ import httpx
 import pymupdf4llm
 
 from discovery_io import load_config, project_path, validate_config
+from markdown_cleaner import MIN_INDEXABLE_CHARS, clean_markdown
 from pipeline_io import (
     append_jsonl_batch,
     content_hash,
@@ -28,6 +30,7 @@ from pipeline_io import (
     relative_path,
     write_text,
 )
+from pipeline_types import DiscoveryRecord, ProcessedRecord
 
 
 MAX_PDF_BYTES = 100 * 1024 * 1024
@@ -41,13 +44,19 @@ def raw_pdf_path(url_hash: str, config: dict) -> Path:
     return base / url_hash[:2] / f"{url_hash}.pdf"
 
 
+def raw_markdown_path(url_hash: str, config: dict) -> Path:
+    """Path del Markdown raw estratto dal PDF."""
+    base = project_path(config["paths"].get("processed_raw_markdown_dir", "data/processed/raw_markdown"))
+    return base / url_hash[:2] / f"{url_hash}.md"
+
+
 def markdown_path(url_hash: str, config: dict) -> Path:
-    """Path del Markdown estratto."""
+    """Path del Markdown pulito e indicizzabile."""
     base = project_path(config["paths"].get("processed_markdown_dir", "data/processed/markdown"))
     return base / url_hash[:2] / f"{url_hash}.md"
 
 
-def pdf_records(config: dict, recent_urls: set[str]) -> list[dict]:
+def pdf_records(config: dict, recent_urls: set[str]) -> list[DiscoveryRecord]:
     """Record PDF scoperti e non processati di recente."""
     discovered_path = project_path(config["paths"]["discovered_urls_file"])
     return [
@@ -58,7 +67,7 @@ def pdf_records(config: dict, recent_urls: set[str]) -> list[dict]:
     ]
 
 
-def download_pdf(record: dict, config: dict, client: httpx.Client) -> dict:
+def download_pdf(record: DiscoveryRecord, config: dict, client: httpx.Client) -> dict:
     """Scarica un PDF rispettando MAX_PDF_BYTES."""
     url = record["url"]
     url_hash = record["hash"]
@@ -116,7 +125,7 @@ def extract_pdf_markdown(pdf_path: str) -> tuple[str, str | None]:
         return "", str(error)
 
 
-def base_manifest_record(record: dict, status: str, crawled_at: str) -> dict:
+def base_manifest_record(record: DiscoveryRecord, status: str, crawled_at: str) -> ProcessedRecord:
     """Campi comuni dei record manifest PDF."""
     return {
         "source": "pdf",
@@ -133,7 +142,7 @@ def build_manifest_record(
     markdown: str = "",
     error: str | None = None,
     config: dict | None = None,
-) -> dict:
+) -> ProcessedRecord:
     """Crea un record processed per un PDF."""
     record = download["record"]
     crawled_at = now_iso()
@@ -142,10 +151,15 @@ def build_manifest_record(
         manifest_record = base_manifest_record(record, "too_large", crawled_at)
         manifest_record.update(
             content_hash=None,
+            raw_content_hash=None,
             markdown_path=None,
+            raw_markdown_path=None,
+            clean_markdown_path=None,
+            index_markdown_path=None,
             raw_pdf_path=download.get("raw_pdf_path"),
             content_length=download.get("content_length"),
             text_extracted=False,
+            indexable=False,
         )
         return manifest_record
 
@@ -153,9 +167,14 @@ def build_manifest_record(
         manifest_record = base_manifest_record(record, "failed", crawled_at)
         manifest_record.update(
             content_hash=None,
+            raw_content_hash=None,
             markdown_path=None,
+            raw_markdown_path=None,
+            clean_markdown_path=None,
+            index_markdown_path=None,
             raw_pdf_path=download.get("raw_pdf_path"),
             text_extracted=False,
+            indexable=False,
             error=error,
         )
         return manifest_record
@@ -163,17 +182,38 @@ def build_manifest_record(
     if config is None:
         raise ValueError("config è richiesto per salvare il Markdown PDF.")
 
+    raw_output_path = write_text(raw_markdown_path(record["hash"], config), markdown)
+    metadata = {
+        "url": record["url"],
+        "document_url": record.get("document_url", record["url"]),
+        "source": "pdf",
+        "hash": record["hash"],
+        "title": None,
+        "breadcrumb": [],
+        "last_crawled": crawled_at,
+    }
+    clean_body, index_markdown, quality = clean_markdown(
+        markdown,
+        source="pdf",
+        metadata=metadata,
+    )
     output_path = markdown_path(record["hash"], config)
-    markdown_output = write_text(output_path, markdown)
-    text_extracted = len(markdown.strip()) >= 100
+    markdown_output = write_text(output_path, index_markdown)
+    text_extracted = len(clean_body.strip()) >= MIN_INDEXABLE_CHARS
 
     manifest_record = base_manifest_record(record, "ok", crawled_at)
     manifest_record.update(
-        content_hash=content_hash(markdown),
+        content_hash=content_hash(clean_body),
+        raw_content_hash=content_hash(markdown),
         markdown_path=markdown_output,
+        raw_markdown_path=raw_output_path,
+        clean_markdown_path=markdown_output,
+        index_markdown_path=markdown_output,
         raw_pdf_path=download.get("raw_pdf_path"),
         text_extracted=text_extracted,
-        markdown_chars=len(markdown),
+        markdown_chars=len(clean_body),
+        indexable=text_extracted,
+        **quality,
     )
     return manifest_record
 
@@ -192,7 +232,7 @@ def run_extract_pdf() -> dict:
     timeout = httpx.Timeout(config["crawler"]["timeout"])
 
     downloads: list[dict] = []
-    manifest_records: list[dict] = []
+    manifest_records: list[ProcessedRecord] = []
 
     with httpx.Client(headers=headers, timeout=timeout) as client:
         for record in records:

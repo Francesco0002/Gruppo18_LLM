@@ -12,9 +12,9 @@ misurabili e pronti per chunking, embedding e indicizzazione vettoriale.
 discover.py
   -> discovered_urls.jsonl + raw_html/
 scrape.py
-  -> markdown HTML + manifest.jsonl
+  -> raw markdown HTML + markdown pulito + manifest.jsonl
 extract_pdf.py
-  -> markdown PDF + manifest.jsonl
+  -> raw markdown PDF + markdown pulito + manifest.jsonl
 ingest.py
   -> marcatura duplicati + stats.json corrente + storico run
 ```
@@ -54,8 +54,10 @@ Responsabilità:
 
 - legge gli HTML `status="ok"` e `indexable=true` da `discovered_urls.jsonl`;
 - legge il file HTML grezzo già salvato, senza riscaricare la pagina;
-- genera Markdown pulito con Crawl4AI;
-- salva Markdown in `data/processed/markdown/<sh>/<hash>.md`;
+- genera Markdown raw con Crawl4AI;
+- salva il raw in `data/processed/raw_markdown/<sh>/<hash>.md`;
+- pulisce boilerplate conservativo e aggiunge front matter YAML;
+- salva il Markdown indicizzabile in `data/processed/markdown/<sh>/<hash>.md`;
 - aggiunge record a `data/processed/manifest.jsonl`;
 - salta URL HTML già processati negli ultimi 7 giorni.
 
@@ -71,8 +73,10 @@ Responsabilità:
 
 - legge PDF `status="pending_download"` da `discovered_urls.jsonl`;
 - scarica i PDF in `data/raw_pdf/<sh>/<hash>.pdf`;
-- converte i PDF in Markdown con `pymupdf4llm`;
-- salva Markdown in `data/processed/markdown/<sh>/<hash>.md`;
+- converte i PDF in Markdown raw con `pymupdf4llm`;
+- salva il raw in `data/processed/raw_markdown/<sh>/<hash>.md`;
+- normalizza artefatti PDF evidenti e aggiunge front matter YAML;
+- salva il Markdown indicizzabile in `data/processed/markdown/<sh>/<hash>.md`;
 - aggiunge record a `data/processed/manifest.jsonl`;
 - salta PDF già processati negli ultimi 7 giorni.
 
@@ -112,7 +116,9 @@ usano invece solo l'ultimo record disponibile per ogni `source+url`, così
 La futura fase di indexing userà la stessa regola tramite
 `pipeline_io.latest_records_by_url()`: leggerà lo storico `manifest.jsonl`,
 terrà solo lo stato corrente di ogni documento, poi indicizzerà solo record
-`status="ok"`, non duplicati e con `markdown_path` presente.
+`status="ok"`, `indexable=true`, `text_extracted=true`, non duplicati e con
+`index_markdown_path` presente. `markdown_path` resta alias compatibile dello
+stesso file indicizzabile.
 
 ## Output Principali
 
@@ -121,7 +127,8 @@ terrà solo lo stato corrente di ogni documento, poi indicizzerà solo record
 | `data/discovered_urls.jsonl` | Manifest della discovery URL. |
 | `data/raw_html/` | HTML grezzo indicizzabile. |
 | `data/raw_pdf/` | PDF scaricati. |
-| `data/processed/markdown/` | Markdown finale da HTML e PDF. |
+| `data/processed/raw_markdown/` | Markdown estratto prima della pulizia. |
+| `data/processed/markdown/` | Markdown pulito e indicizzabile da HTML e PDF. |
 | `data/processed/manifest.jsonl` | Manifest append-only dei documenti processati. |
 | `data/processed/stats.json` | Ultime statistiche generate sullo stato corrente. |
 | `data/processed/runs/<crawl_run_id>/stats.json` | Copia storica delle statistiche di un run. |
@@ -150,6 +157,16 @@ terrà solo lo stato corrente di ogni documento, poi indicizzerà solo record
 | `uploads` PDF | Rilevati; scaricati solo se `robots.txt` lo permette. |
 
 ## Note Operative
+
+Ogni record processed conserva `raw_markdown_path`, `clean_markdown_path`,
+`index_markdown_path` e `markdown_path`. I campi di qualità
+(`clean_status`, `clean_warnings`, `raw_markdown_chars`,
+`clean_markdown_chars`, `removed_chars_ratio`) descrivono quanto è stata
+modificata l'estrazione raw.
+
+I Markdown puliti sotto 100 caratteri restano tracciati nel manifest, ma sono
+marcati `text_extracted=false` e `indexable=false` per evitare chunk di sola
+navigazione o pagine tecniche quasi vuote.
 
 Per ripartire da zero:
 

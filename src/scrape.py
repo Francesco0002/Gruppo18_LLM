@@ -1,11 +1,12 @@
 """
-Conversione degli HTML scoperti in Markdown pulito.
+Conversione degli HTML scoperti in Markdown raw e Markdown pulito.
 
 Input:
 - data/discovered_urls.jsonl
 - data/raw_html/<sh>/<hash>.html
 
 Output:
+- data/processed/raw_markdown/<sh>/<hash>.md
 - data/processed/markdown/<sh>/<hash>.md
 - data/processed/manifest.jsonl
 """
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 from dotenv import load_dotenv
+from markdown_cleaner import MIN_INDEXABLE_CHARS, clean_markdown
 from pipeline_io import (
     BASE_DIR,
     append_jsonl_batch,
@@ -28,6 +30,7 @@ from pipeline_io import (
     relative_path,
     write_text,
 )
+from pipeline_types import DiscoveryRecord, ProcessedRecord
 
 # Crawl4AI usa questa variabile con il nome CRAWL4_AI_BASE_DIRECTORY.
 # La impostiamo prima dell'import per tenere cache e DB dentro il progetto.
@@ -50,16 +53,22 @@ BATCH_SIZE = 100
 SKIP_RECENT_DAYS = 7
 
 
+def raw_markdown_path(url_hash: str, config: dict) -> Path:
+    """Path del Markdown raw generato dallo scraper."""
+    base = project_path(config["paths"].get("processed_raw_markdown_dir", "data/processed/raw_markdown"))
+    return base / url_hash[:2] / f"{url_hash}.md"
+
+
 def processed_markdown_path(url_hash: str, config: dict) -> Path:
-    """Path del Markdown fit."""
+    """Path del Markdown pulito e indicizzabile."""
     base = project_path(config["paths"].get("processed_markdown_dir", "data/processed/markdown"))
     return base / url_hash[:2] / f"{url_hash}.md"
 
 
-def html_records(config: dict, recent_urls: set[str]) -> list[dict]:
+def html_records(config: dict, recent_urls: set[str]) -> list[DiscoveryRecord]:
     """Record HTML scoperti e non processati di recente."""
     discovered_path = project_path(config["paths"]["discovered_urls_file"])
-    records: list[dict] = []
+    records: list[DiscoveryRecord] = []
 
     for record in load_jsonl(discovered_path):
         if record.get("type") != "html":
@@ -156,11 +165,11 @@ async def close_crawler(crawler: AsyncWebCrawler | None) -> None:
 
 
 async def process_html_record(
-    record: dict,
+    record: DiscoveryRecord,
     crawler: AsyncWebCrawler | None,
     run_config: CrawlerRunConfig,
     config: dict,
-) -> dict:
+) -> ProcessedRecord:
     """Processa un HTML raw e produce un record del manifest processed."""
     crawled_at = now_iso()
     raw_path = project_path(record["raw_path"])
@@ -170,14 +179,29 @@ async def process_html_record(
     try:
         html = raw_path.read_text(encoding="utf-8")
         title, breadcrumb = extract_title_and_breadcrumb(html)
-        fit_markdown = await markdown_from_crawl4ai_raw(
+        raw_markdown = await markdown_from_crawl4ai_raw(
             crawler,
             run_config,
             html,
             url,
         )
-
-        markdown_path = write_text(processed_markdown_path(url_hash, config), fit_markdown)
+        raw_output_path = write_text(raw_markdown_path(url_hash, config), raw_markdown)
+        metadata = {
+            "url": url,
+            "document_url": record.get("document_url", url),
+            "source": "html",
+            "hash": url_hash,
+            "title": title,
+            "breadcrumb": breadcrumb,
+            "last_crawled": crawled_at,
+        }
+        clean_body, index_markdown, quality = clean_markdown(
+            raw_markdown,
+            source="html",
+            metadata=metadata,
+        )
+        index_output_path = write_text(processed_markdown_path(url_hash, config), index_markdown)
+        text_extracted = len(clean_body.strip()) >= MIN_INDEXABLE_CHARS
 
         return {
             "source": "html",
@@ -185,14 +209,20 @@ async def process_html_record(
             "url": url,
             "document_url": record.get("document_url", url),
             "hash": url_hash,
-            "content_hash": content_hash(fit_markdown),
-            "markdown_path": markdown_path,
+            "content_hash": content_hash(clean_body),
+            "raw_content_hash": content_hash(raw_markdown),
+            "markdown_path": index_output_path,
+            "raw_markdown_path": raw_output_path,
+            "clean_markdown_path": index_output_path,
+            "index_markdown_path": index_output_path,
             "raw_html_path": record["raw_path"],
             "title": title,
             "breadcrumb": breadcrumb,
             "last_crawled": crawled_at,
-            "text_extracted": bool(fit_markdown.strip()),
-            "markdown_chars": len(fit_markdown),
+            "text_extracted": text_extracted,
+            "markdown_chars": len(clean_body),
+            "indexable": text_extracted,
+            **quality,
         }
     except Exception as error:
         return {
@@ -206,7 +236,7 @@ async def process_html_record(
         }
 
 
-def chunked(items: list[dict], size: int) -> Iterable[list[dict]]:
+def chunked(items: list[DiscoveryRecord], size: int) -> Iterable[list[DiscoveryRecord]]:
     """Divide una lista in batch."""
     for start in range(0, len(items), size):
         yield items[start : start + size]
@@ -236,7 +266,7 @@ async def run_scrape() -> dict:
 
     try:
         for batch_index, batch in enumerate(chunked(records, BATCH_SIZE), start=0):
-            output_records: list[dict] = []
+            output_records: list[ProcessedRecord] = []
             for record in batch:
                 processed = await process_html_record(record, crawler, run_config, config)
                 output_records.append(processed)

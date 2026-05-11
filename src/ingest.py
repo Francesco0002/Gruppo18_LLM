@@ -34,6 +34,7 @@ from pipeline_io import (
     write_json,
     write_jsonl_atomic,
 )
+from pipeline_types import ProcessedRecord
 from scrape import run_scrape
 
 
@@ -49,7 +50,7 @@ def domain_from_record(record: dict) -> str:
     return urlparse(url).netloc or "unknown"
 
 
-def is_duplicate_candidate(record: dict) -> bool:
+def is_duplicate_candidate(record: ProcessedRecord) -> bool:
     """True se il record può essere confrontato tramite content_hash."""
     return (
         record.get("status") == "ok"
@@ -59,7 +60,9 @@ def is_duplicate_candidate(record: dict) -> bool:
     )
 
 
-def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], list[dict], dict]:
+def mark_duplicate_documents(
+    records: list[ProcessedRecord],
+) -> tuple[list[ProcessedRecord], list[ProcessedRecord], dict]:
     """
     Marca i duplicati esatti sullo stato corrente del manifest.
 
@@ -68,7 +71,7 @@ def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], list[dict
     calcolano solo sull'ultimo record disponibile per ogni source+url. A parità
     di content_hash, il record canonico preferisce HTML rispetto a PDF.
     """
-    first_by_content_hash: dict[str, dict] = {}
+    first_by_content_hash: dict[str, ProcessedRecord] = {}
     updated_records = [dict(record) for record in records]
     current_indexes = latest_record_indexes(updated_records)
     duplicate_count = 0
@@ -115,7 +118,7 @@ def count_by(records: list[dict], key: str) -> dict[str, int]:
     return dict(counter)
 
 
-def markdown_char_stats(records: list[dict]) -> dict:
+def markdown_char_stats(records: list[ProcessedRecord]) -> dict:
     """Statistiche di lunghezza Markdown sui record OK non duplicati."""
     values = [
         int(record.get("markdown_chars", 0))
@@ -150,7 +153,7 @@ def build_discovery_stats(config: dict) -> dict:
 
 
 def build_processed_stats(
-    records: list[dict],
+    records: list[ProcessedRecord],
     duplicate_stats: dict,
 ) -> dict:
     """Aggrega statistiche sullo stato corrente del manifest processed."""
@@ -161,6 +164,7 @@ def build_processed_stats(
         and record.get("markdown_path")
         and not record.get("is_duplicate", False)
         and record.get("text_extracted") is not False
+        and record.get("indexable", True) is not False
     ]
     empty_or_short_records = [
         record
@@ -177,6 +181,7 @@ def build_processed_stats(
         "empty_or_short_records": len(empty_or_short_records),
         "by_source": count_by(records, "source"),
         "by_status": count_by(records, "status"),
+        "by_clean_status": count_by(records, "clean_status"),
         "by_domain": dict(Counter(domain_from_record(record) for record in records)),
         "markdown_chars": markdown_char_stats(records),
     }
@@ -208,7 +213,7 @@ def write_stats(
     config: dict,
     run_id: str,
     step_stats: dict,
-    current_manifest_records: list[dict],
+    current_manifest_records: list[ProcessedRecord],
     duplicate_stats: dict,
 ) -> dict:
     """Genera le statistiche e le salva come ultimo report e nello storico run."""

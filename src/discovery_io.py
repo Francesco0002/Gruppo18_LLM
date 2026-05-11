@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 
 from discovery_models import CrawlItem, CrawlState
 from pipeline_io import BASE_DIR, relative_path, write_json, write_text
+from pipeline_types import DiscoveryRecord
 from url_filters import can_traverse_url, normalize_url
 
 
@@ -190,12 +191,12 @@ def make_record(
     document_url: str | None = None,
     indexable: bool = False,
     **extra: object,
-) -> dict:
+) -> DiscoveryRecord:
     """Crea un record per data/discovered_urls.jsonl."""
     requested_url = item.url
     final_url = normalize_url(final_url or requested_url)
     document_url = normalize_url(document_url or canonical_url or final_url)
-    record = {
+    record: DiscoveryRecord = {
         "hash": short_hash(document_url),
         "requested_hash": short_hash(requested_url),
         "url": document_url,
@@ -216,7 +217,7 @@ def make_record(
 
 def write_record(
     output_file: Path,
-    record: dict,
+    record: DiscoveryRecord,
     status_counts: Counter[str],
     type_counts: Counter[str],
 ) -> None:

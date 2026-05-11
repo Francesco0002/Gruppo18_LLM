@@ -14,8 +14,8 @@ src/
   discovery_models.py     Dataclass condivise
   html_utils.py           Utility HTML
   url_filters.py          Regole di scope e filtri URL
-  scrape.py               HTML raw -> Markdown
-  extract_pdf.py          PDF -> Markdown
+  scrape.py               HTML raw -> Markdown raw + pulito
+  extract_pdf.py          PDF -> Markdown raw + pulito
   ingest.py               Pipeline completa + duplicati + stats
   pipeline_io.py          Utility comuni per JSONL, hash e file
   legacy/                 Prototipi non più usati
@@ -47,7 +47,7 @@ Discovery:
 python src/discover.py
 ```
 
-Conversione HTML e PDF:
+Conversione HTML e PDF in Markdown raw e Markdown pulito:
 
 ```bash
 python src/scrape.py
@@ -83,6 +83,9 @@ docs/pipeline.md
 ```
 
 ## Note
+
+`data/processed/markdown/` contiene il Markdown pulito da indicizzare;
+`data/processed/raw_markdown/` conserva l'estrazione originale per debug.
 
 `config.yaml`, `.env`, virtual environment, file in `data/`, indici e API key
 non devono essere versionati su Git.

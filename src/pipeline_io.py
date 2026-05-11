@@ -18,6 +18,8 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from pipeline_types import ProcessedRecord
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -33,8 +35,11 @@ def content_hash(text: str) -> str:
 
 
 def relative_path(path: Path) -> str:
-    """Path relativo alla root progetto."""
-    return str(path.relative_to(BASE_DIR))
+    """Path relativo alla root progetto, assoluto se fuori repo."""
+    try:
+        return str(path.relative_to(BASE_DIR))
+    except ValueError:
+        return str(path)
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -51,7 +56,7 @@ def load_jsonl(path: Path) -> list[dict]:
     return rows
 
 
-def manifest_record_key(record: dict) -> tuple[str, str]:
+def manifest_record_key(record: ProcessedRecord) -> tuple[str, str]:
     """Chiave stabile per identificare un documento nel manifest processed.
 
     Il manifest è append-only: lo stesso URL può avere più tentativi nel tempo.
@@ -62,7 +67,7 @@ def manifest_record_key(record: dict) -> tuple[str, str]:
     return source, url
 
 
-def latest_record_indexes(records: list[dict]) -> list[int]:
+def latest_record_indexes(records: list[ProcessedRecord]) -> list[int]:
     """Indici dell'ultimo record disponibile per ogni documento."""
     latest_by_key: dict[tuple[str, str], int] = {}
     for index, record in enumerate(records):
@@ -70,7 +75,7 @@ def latest_record_indexes(records: list[dict]) -> list[int]:
     return sorted(latest_by_key.values())
 
 
-def latest_records_by_url(records: list[dict]) -> list[dict]:
+def latest_records_by_url(records: list[ProcessedRecord]) -> list[ProcessedRecord]:
     """Vista corrente di un manifest append-only.
 
     Restituisce solo l'ultimo record per ogni source+url, preservando l'ordine

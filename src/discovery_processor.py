@@ -25,6 +25,7 @@ from discovery_fetch import DomainRateLimiter, RobotsCache, fetch_discovery_cand
 from discovery_io import make_record
 from discovery_models import CrawlItem, FetchResult, ProcessedDiscoveryItem
 from html_utils import extract_canonical_from_soup, extract_links_from_soup
+from pipeline_types import DiscoveryRecord
 from url_filters import can_index_url, can_traverse_url, is_pdf_url
 
 
@@ -72,11 +73,11 @@ def split_document_links(links: list[str]) -> tuple[list[str], list[str]]:
 
 
 def processed_item(
-    record: dict,
+    record: DiscoveryRecord,
     traversal_links: list[str] | None = None,
     html: str | None = None,
     additional_visited: list[str] | None = None,
-    linked_pdf_records: list[dict] | None = None,
+    linked_pdf_records: list[DiscoveryRecord] | None = None,
 ) -> ProcessedDiscoveryItem:
     """Costruisce un risultato di discovery con campi espliciti."""
     return ProcessedDiscoveryItem(
@@ -88,7 +89,7 @@ def processed_item(
     )
 
 
-def make_pdf_record(item: CrawlItem, status: str, **extra: object) -> dict:
+def make_pdf_record(item: CrawlItem, status: str, **extra: object) -> DiscoveryRecord:
     """Crea un record PDF con campi comuni coerenti."""
     final_url = str(extra.pop("final_url", item.url))
     return make_record(
@@ -109,7 +110,7 @@ def make_fetch_record(
     final_url: str,
     candidate: FetchResult,
     **extra: object,
-) -> dict:
+) -> DiscoveryRecord:
     """Crea un record per esiti legati a una risposta HTTP già classificata."""
     return make_record(
         item,
@@ -129,9 +130,9 @@ async def make_linked_pdf_records(
     parent_url: str,
     parent_depth: int,
     robots: RobotsCache | None,
-) -> list[dict]:
+) -> list[DiscoveryRecord]:
     """Crea record PDF appena il link viene trovato in una pagina HTML."""
-    records: list[dict] = []
+    records: list[DiscoveryRecord] = []
 
     for pdf_url in pdf_links:
         item = CrawlItem(pdf_url, parent_depth + 1, parent_url)

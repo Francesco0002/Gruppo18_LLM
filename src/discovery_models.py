@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections import Counter, deque
 from dataclasses import dataclass
 
+from pipeline_types import DiscoveryRecord
+
 
 @dataclass
 class CrawlItem:
@@ -50,8 +52,8 @@ class FetchResult:
 class ProcessedDiscoveryItem:
     """Risultato del processing di un singolo URL in discovery."""
 
-    record: dict
+    record: DiscoveryRecord
     traversal_links: list[str]
     html: str | None
     additional_visited: list[str]
-    linked_pdf_records: list[dict]
+    linked_pdf_records: list[DiscoveryRecord]
