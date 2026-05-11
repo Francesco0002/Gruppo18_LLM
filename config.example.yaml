@@ -57,10 +57,10 @@ scope:
   teacher_domain: docenti.unisa.it
   course_domain: corsi.unisa.it
 
-  # Slug ammessi per corsi.unisa.it/<slug>/...
+  # Percorsi corso ammessi per corsi.unisa.it/<percorso-corso>/...
   # Solo i corsi DIEM elencati qui vengono attraversati: niente match
   # generici sul primo segmento numerico (regola stretta).
-  allowed_course_slugs:
+  allowed_course_paths:
     - ingegneria-dell-informazione-per-la-medicina-digitale
     - ingegneria-informatica
     - electrical-engineering-for-digital-energy
@@ -69,7 +69,7 @@ scope:
     - ingegneria-dell-informazione
     - photovoltaics
 
-  # Codici corso DIEM riconosciuti nel path (oltre agli slug).
+  # Codici corso DIEM riconosciuti nel path (oltre ai percorsi corso).
   # Quotare i codici puramente numerici per evitare che YAML li
   # interpreti come integer.
   allowed_course_codes:

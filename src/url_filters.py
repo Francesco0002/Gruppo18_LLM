@@ -4,7 +4,7 @@ Filtri URL per la discovery.
 Le regole riflettono lo scope dell'assignment:
 - pagine sotto www.diem.unisa.it;
 - profili docenti DIEM sotto docenti.unisa.it, raggiunti da pagine in scope;
-- corsi DIEM sotto corsi.unisa.it, riconosciuti da slug/codici in config;
+- corsi DIEM sotto corsi.unisa.it, riconosciuti da percorsi/codici in config;
 - PDF referenziati da pagine in scope.
 
 Tabella delle regole principali:
@@ -13,7 +13,7 @@ Tabella delle regole principali:
 |-----------------------|------------------------------------------------------------|
 | www.diem.unisa.it     | Ammesso.                                                   |
 | docenti.unisa.it      | Solo se scoperto da DIEM o da un profilo docente in scope. |
-| corsi.unisa.it        | Solo slug/codici DIEM configurati.                         |
+| corsi.unisa.it        | Solo percorsi/codici DIEM configurati.                     |
 | uploads PDF           | Rilevati; scaricati solo se robots.txt lo permette.        |
 """
 
@@ -233,18 +233,27 @@ def is_diem_url(url: str, config: dict) -> bool:
     return domain_of(url) == scope_value(config, "diem_domain", "www.diem.unisa.it")
 
 
-def course_has_allowed_identifier(url: str, config: dict) -> bool:
-    """True se un URL corsi.unisa.it contiene slug o codice corso DIEM."""
-    allowed_slugs = {
-        str(slug).lower()
-        for slug in config_list(config, "scope", "allowed_course_slugs")
+def configured_course_paths(config: dict) -> set[str]:
+    """Percorsi corso ammessi come primo segmento di corsi.unisa.it.
+
+    Esempio: in https://corsi.unisa.it/ingegneria-informatica/didattica,
+    il percorso corso è "ingegneria-informatica".
+    """
+    return {
+        str(course_path).lower()
+        for course_path in config_list(config, "scope", "allowed_course_paths")
     }
+
+
+def course_has_allowed_identifier(url: str, config: dict) -> bool:
+    """True se un URL corsi.unisa.it contiene percorso o codice corso DIEM."""
+    allowed_course_paths = configured_course_paths(config)
     allowed_codes = {
         str(code).lower()
         for code in config_list(config, "scope", "allowed_course_codes")
     }
     path = urlparse(url).path.lower()
-    return first_path_segment(url) in allowed_slugs or any(
+    return first_path_segment(url) in allowed_course_paths or any(
         code in path for code in allowed_codes
     )
 

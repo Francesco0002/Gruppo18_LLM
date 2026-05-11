@@ -1,4 +1,15 @@
-"""Rete, robots.txt e sitemap per la discovery."""
+"""
+Funzioni di rete usate dalla discovery.
+
+Responsabilità:
+- applicare il rate limit per dominio;
+- leggere e memorizzare robots.txt;
+- scaricare pagine/sitemap con httpx;
+- riconoscere HTML, PDF e risposte troppo grandi.
+
+Questo modulo non decide lo scope del progetto: per quello usa le funzioni di
+url_filters.py.
+"""
 
 from __future__ import annotations
 

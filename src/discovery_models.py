@@ -1,4 +1,12 @@
-"""Modelli dati condivisi dalla fase di discovery."""
+"""
+Dataclass condivise dalla fase di discovery.
+
+I modelli tengono separati i contratti dati dalla logica:
+- CrawlItem rappresenta un URL nella coda BFS;
+- CrawlState rappresenta lo stato persistito nel checkpoint;
+- FetchResult rappresenta una risposta HTTP già classificata;
+- ProcessedDiscoveryItem rappresenta l'esito del processing di un URL.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,13 @@
-"""Utility HTML usate dalla discovery."""
+"""
+Utility HTML usate dalla discovery.
+
+Responsabilità:
+- risolvere href relativi secondo le convenzioni UNISA;
+- leggere il canonical da una BeautifulSoup già disponibile;
+- estrarre link attraversabili da una pagina HTML.
+
+La decisione se un URL sia nello scope resta in url_filters.py.
+"""
 
 from __future__ import annotations
 

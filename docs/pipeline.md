@@ -16,7 +16,7 @@ scrape.py
 extract_pdf.py
   -> markdown PDF + manifest.jsonl
 ingest.py
-  -> marcatura duplicati + stats.json
+  -> marcatura duplicati + stats.json corrente + storico run
 ```
 
 ## 1. Discovery
@@ -97,11 +97,23 @@ python src/ingest.py --stats-only
 Responsabilità:
 
 - coordina discovery, scraping HTML ed estrazione PDF;
-- marca documenti duplicati tramite `content_hash`;
-- genera `data/processed/stats.json`.
+- marca documenti duplicati tramite `content_hash`, considerando lo stato
+  corrente del manifest;
+- genera `data/processed/stats.json`;
+- salva una copia storica in `data/processed/runs/<crawl_run_id>/stats.json`.
 
 `ingest.py` non decide i limiti del crawl: i parametri effettivi sono sempre
 letti da `config.yaml`.
+
+`data/processed/manifest.jsonl` resta append-only: se un URL fallisce e poi
+riesce in una run successiva, conserva entrambe le righe. Le statistiche finali
+usano invece solo l'ultimo record disponibile per ogni `source+url`, così
+`failed` vecchi non falsano lo stato attuale del corpus.
+
+La futura fase di indexing userà la stessa regola tramite
+`pipeline_io.latest_records_by_url()`: leggerà lo storico `manifest.jsonl`,
+terrà solo lo stato corrente di ogni documento, poi indicizzerà solo record
+`status="ok"`, non duplicati e con `markdown_path` presente.
 
 ## Output Principali
 
@@ -111,8 +123,9 @@ letti da `config.yaml`.
 | `data/raw_html/` | HTML grezzo indicizzabile. |
 | `data/raw_pdf/` | PDF scaricati. |
 | `data/processed/markdown/` | Markdown finale da HTML e PDF. |
-| `data/processed/manifest.jsonl` | Manifest dei documenti processati. |
-| `data/processed/stats.json` | Statistiche finali del corpus. |
+| `data/processed/manifest.jsonl` | Manifest append-only dei documenti processati. |
+| `data/processed/stats.json` | Ultime statistiche generate sullo stato corrente. |
+| `data/processed/runs/<crawl_run_id>/stats.json` | Copia storica delle statistiche di un run. |
 | `data/checkpoint.json` | Stato per riprendere la discovery. |
 
 ## Status Discovery
@@ -134,7 +147,7 @@ letti da `config.yaml`.
 |---|---|
 | `www.diem.unisa.it` | Ammesso. |
 | `docenti.unisa.it` | Solo se scoperto da DIEM o da profilo docente in scope. |
-| `corsi.unisa.it` | Solo slug/codici DIEM configurati. |
+| `corsi.unisa.it` | Solo percorsi corso/codici DIEM configurati. |
 | `uploads` PDF | Rilevati; scaricati solo se `robots.txt` lo permette. |
 
 ## Note Operative

@@ -6,7 +6,7 @@ Questo script coordina:
 2. conversione HTML in Markdown
 3. estrazione PDF in Markdown
 4. marcatura dei documenti duplicati nel manifest processed
-5. generazione di data/processed/stats.json
+5. generazione delle statistiche in data/processed/stats.json e nello storico run
 
 La fase di ingest non crea ancora chunk o embedding: prepara un corpus
 Markdown pulito, misurabile e pronto per la fase di indexing.
@@ -18,6 +18,7 @@ import argparse
 import asyncio
 from collections import Counter
 from datetime import UTC, datetime
+from pathlib import Path
 from statistics import mean, median
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -25,7 +26,14 @@ from uuid import uuid4
 from discover import run_discovery
 from discovery_io import load_config, project_path, validate_config
 from extract_pdf import run_extract_pdf
-from pipeline_io import BASE_DIR, load_jsonl, now_iso, write_json, write_jsonl_atomic
+from pipeline_io import (
+    BASE_DIR,
+    latest_record_indexes,
+    load_jsonl,
+    now_iso,
+    write_json,
+    write_jsonl_atomic,
+)
 from scrape import run_scrape
 
 
@@ -52,28 +60,34 @@ def is_duplicate_candidate(record: dict) -> bool:
     return bool(record.get("content_hash"))
 
 
-def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], dict]:
-    """
-    Marca i duplicati esatti basandosi su content_hash.
+def clear_duplicate_fields(record: dict) -> None:
+    """Rimuove marcature duplicato prima di ricalcolarle."""
+    record.pop("duplicate_of", None)
+    record.pop("duplicate_of_url", None)
+    record.pop("duplicate_reason", None)
+    record.pop("is_duplicate", None)
 
-    Lo status resta invariato: aggiungiamo duplicate_of/is_duplicate senza
-    cambiare status="ok", così gli skip incrementali di scrape.py continuano
-    a funzionare anche nei run successivi.
+
+def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], list[dict], dict]:
+    """
+    Marca i duplicati esatti sullo stato corrente del manifest.
+
+    Il manifest è append-only: uno stesso URL può avere prima un failed e poi
+    un ok. Le stats devono descrivere lo stato attuale, quindi i duplicati si
+    calcolano solo sull'ultimo record disponibile per ogni source+url.
     """
     first_by_content_hash: dict[str, dict] = {}
-    updated_records: list[dict] = []
+    updated_records = [dict(record) for record in records]
+    current_indexes = latest_record_indexes(updated_records)
     duplicate_count = 0
     unique_content_hashes = 0
 
-    for original in records:
-        record = dict(original)
-        record.pop("duplicate_of", None)
-        record.pop("duplicate_of_url", None)
-        record.pop("duplicate_reason", None)
-        record.pop("is_duplicate", None)
+    for record in updated_records:
+        clear_duplicate_fields(record)
 
+    for index in current_indexes:
+        record = updated_records[index]
         if not is_duplicate_candidate(record):
-            updated_records.append(record)
             continue
 
         content_hash = record["content_hash"]
@@ -89,11 +103,11 @@ def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], dict]:
             record["duplicate_reason"] = "same_content_hash"
             duplicate_count += 1
 
-        updated_records.append(record)
-
-    return updated_records, {
+    current_records = [updated_records[index] for index in current_indexes]
+    return updated_records, current_records, {
         "duplicates": duplicate_count,
         "unique_content_hashes": unique_content_hashes,
+        "history_records": len(updated_records),
     }
 
 
@@ -140,7 +154,7 @@ def build_processed_stats(
     records: list[dict],
     duplicate_stats: dict,
 ) -> dict:
-    """Aggrega statistiche del manifest processed."""
+    """Aggrega statistiche sullo stato corrente del manifest processed."""
     indexable_records = [
         record
         for record in records
@@ -157,6 +171,7 @@ def build_processed_stats(
 
     return {
         "records": len(records),
+        "history_records": duplicate_stats.get("history_records", len(records)),
         "indexable_records": len(indexable_records),
         "duplicates": duplicate_stats["duplicates"],
         "unique_content_hashes": duplicate_stats["unique_content_hashes"],
@@ -182,26 +197,37 @@ def config_snapshot(config: dict) -> dict:
     }
 
 
+def run_stats_path(config: dict, run_id: str) -> tuple[str, Path]:
+    """Path storico delle statistiche per uno specifico run."""
+    current_stats_path = project_path(config["paths"].get("processed_stats_file", "data/processed/stats.json"))
+    runs_dir = current_stats_path.parent / "runs" / run_id
+    run_path = runs_dir / "stats.json"
+    return str(run_path.relative_to(BASE_DIR)), run_path
+
+
 def write_stats(
     config: dict,
     run_id: str,
     step_stats: dict,
-    manifest_records: list[dict],
+    current_manifest_records: list[dict],
     duplicate_stats: dict,
 ) -> dict:
-    """Genera e salva data/processed/stats.json."""
+    """Genera le statistiche e le salva come ultimo report e nello storico run."""
     stats_path = project_path(config["paths"].get("processed_stats_file", "data/processed/stats.json"))
+    run_stats_relative_path, run_stats_full_path = run_stats_path(config, run_id)
     stats = {
         "crawl_run_id": run_id,
         "generated_at": now_iso(),
         "stats_file": str(stats_path.relative_to(BASE_DIR)),
+        "run_stats_file": run_stats_relative_path,
         "config": config_snapshot(config),
         "steps": step_stats,
         "discovery": build_discovery_stats(config),
-        "processed": build_processed_stats(manifest_records, duplicate_stats),
+        "processed": build_processed_stats(current_manifest_records, duplicate_stats),
     }
 
     write_json(stats_path, stats)
+    write_json(run_stats_full_path, stats)
     return stats
 
 
@@ -214,10 +240,12 @@ def print_stats_summary(stats: dict) -> None:
     print(f"- crawl_run_id: {stats['crawl_run_id']}")
     print(f"- discovered_records: {discovery['records']}")
     print(f"- processed_records: {processed['records']}")
+    print(f"- manifest_history_records: {processed['history_records']}")
     print(f"- indexable_records: {processed['indexable_records']}")
     print(f"- duplicates: {processed['duplicates']}")
     print(f"- empty_or_short_records: {processed['empty_or_short_records']}")
     print(f"- stats_file: {stats['stats_file']}")
+    print(f"- run_stats_file: {stats['run_stats_file']}")
 
 
 async def run_ingest(stats_only: bool = False) -> dict:
@@ -248,12 +276,12 @@ async def run_ingest(stats_only: bool = False) -> dict:
 
     print(f"\n{duplicate_label} Marcatura documenti duplicati")
     manifest_records = load_jsonl(manifest_path)
-    manifest_records, duplicate_stats = mark_duplicate_documents(manifest_records)
+    manifest_records, current_manifest_records, duplicate_stats = mark_duplicate_documents(manifest_records)
     write_jsonl_atomic(manifest_path, manifest_records)
     print(f"Duplicati marcati: {duplicate_stats['duplicates']}")
 
     print(f"\n{stats_label} Stats")
-    stats = write_stats(config, run_id, step_stats, manifest_records, duplicate_stats)
+    stats = write_stats(config, run_id, step_stats, current_manifest_records, duplicate_stats)
     print_stats_summary(stats)
     return stats
 
@@ -264,7 +292,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stats-only",
         action="store_true",
-        help="Non rilancia la pipeline: marca i duplicati nel manifest esistente e rigenera stats.json.",
+        help=(
+            "Non rilancia la pipeline: marca i duplicati nel manifest esistente "
+            "e rigenera le statistiche correnti e storiche."
+        ),
     )
     return parser.parse_args()
 

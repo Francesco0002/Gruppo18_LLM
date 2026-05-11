@@ -1,4 +1,15 @@
-"""Input/output su filesystem per la fase di discovery."""
+"""
+Input/output su filesystem per la fase di discovery.
+
+Responsabilità:
+- leggere e validare config.yaml;
+- risolvere path relativi alla root progetto;
+- leggere seed URL;
+- creare record per discovered_urls.jsonl;
+- salvare HTML grezzo e checkpoint BFS.
+
+Questo modulo non effettua richieste HTTP e non processa HTML.
+"""
 
 from __future__ import annotations
 
@@ -58,7 +69,7 @@ def validate_config(config: dict) -> None:
         "diem_domain",
         "teacher_domain",
         "course_domain",
-        "allowed_course_slugs",
+        "allowed_course_paths",
         "allowed_course_codes",
     ]
 
