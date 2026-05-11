@@ -57,10 +57,35 @@ class DomainRateLimiter:
 class RobotsCache:
     """Carica robots.txt una sola volta per dominio."""
 
-    def __init__(self, user_agent: str) -> None:
+    def __init__(self, user_agent: str, timeout: float) -> None:
         self.user_agent = user_agent
+        self.timeout = timeout
         self.parsers: dict[str, RobotFileParser] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+
+    async def load_parser(self, domain: str) -> RobotFileParser:
+        """Legge robots.txt con timeout esplicito e fallback permissivo."""
+        parser = RobotFileParser()
+        robots_url = f"https://{domain}/robots.txt"
+        parser.set_url(robots_url)
+
+        try:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": self.user_agent},
+                timeout=httpx.Timeout(self.timeout),
+            ) as client:
+                response = await client.get(robots_url, follow_redirects=True)
+
+            if response.status_code == 404:
+                parser.allow_all = True
+            else:
+                response.raise_for_status()
+                parser.parse(response.text.splitlines())
+        except httpx.HTTPError as error:
+            print(f"robots.txt non disponibile per {domain}, crawl permesso: {error.__class__.__name__}")
+            parser.allow_all = True
+
+        return parser
 
     async def can_fetch(self, url: str) -> bool:
         """True se robots.txt permette di scaricare l'URL."""
@@ -69,14 +94,7 @@ class RobotsCache:
 
         async with lock:
             if domain not in self.parsers:
-                parser = RobotFileParser()
-                parser.set_url(f"https://{domain}/robots.txt")
-                try:
-                    await asyncio.to_thread(parser.read)
-                except Exception:
-                    # Se robots.txt non è raggiungibile, non blocchiamo il crawl.
-                    parser.allow_all = True
-                self.parsers[domain] = parser
+                self.parsers[domain] = await self.load_parser(domain)
 
         return self.parsers[domain].can_fetch(self.user_agent, url)
 

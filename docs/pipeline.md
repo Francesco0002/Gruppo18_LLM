@@ -56,7 +56,6 @@ Responsabilità:
 - legge il file HTML grezzo già salvato, senza riscaricare la pagina;
 - genera Markdown pulito con Crawl4AI;
 - salva Markdown in `data/processed/markdown/<sh>/<hash>.md`;
-- salva un campione di Markdown raw in `data/processed/markdown_raw/`;
 - aggiunge record a `data/processed/manifest.jsonl`;
 - salta URL HTML già processati negli ultimi 7 giorni.
 

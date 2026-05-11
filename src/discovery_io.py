@@ -15,19 +15,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import Counter, deque
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
+from dotenv import load_dotenv
 
 from discovery_models import CrawlItem, CrawlState
-from pipeline_io import write_json
+from pipeline_io import BASE_DIR, relative_path, write_json, write_text
 from url_filters import can_traverse_url, normalize_url
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE_DIR / "config.yaml"
 
 
@@ -41,6 +42,7 @@ def project_path(path: str | Path) -> Path:
 
 def load_config() -> dict:
     """Legge config.yaml."""
+    load_dotenv(BASE_DIR / ".env")
     with CONFIG_FILE.open("r", encoding="utf-8") as file:
         return yaml.safe_load(file)
 
@@ -97,6 +99,33 @@ def validate_config(config: dict) -> None:
     if config["crawler"]["rate_limit_per_domain_rps"] <= 0:
         raise ValueError("crawler.rate_limit_per_domain_rps deve essere > 0.")
 
+    if config["crawler"]["max_total_urls"] <= 0:
+        raise ValueError("crawler.max_total_urls deve essere > 0.")
+
+    if config["crawler"]["max_depth"] < 0:
+        raise ValueError("crawler.max_depth deve essere >= 0.")
+
+    if config["crawler"]["timeout"] <= 0:
+        raise ValueError("crawler.timeout deve essere > 0.")
+
+    if config["crawler"]["max_html_bytes"] <= 0:
+        raise ValueError("crawler.max_html_bytes deve essere > 0.")
+
+    allowed_domains = {
+        str(domain).lower()
+        for domain in config["crawler"]["allowed_domains"]
+    }
+    limited_domains = {
+        str(domain).lower()
+        for domain in config["crawler"]["per_domain_limits"]
+    }
+    missing_limits = sorted(allowed_domains - limited_domains)
+    if missing_limits:
+        raise ValueError(
+            "crawler.per_domain_limits manca per: "
+            + ", ".join(missing_limits)
+        )
+
 
 def ensure_parent_dir(path: Path) -> None:
     """Crea la cartella padre del file, se non esiste."""
@@ -113,11 +142,6 @@ def html_output_path(document_url: str, config: dict) -> Path:
     url_id = short_hash(document_url)
     raw_html_dir = project_path(config["paths"]["raw_html_dir"])
     return raw_html_dir / url_id[:2] / f"{url_id}.html"
-
-
-def relative_path(path: Path) -> str:
-    """Path relativo alla root del progetto, più leggibile nel JSONL."""
-    return str(path.relative_to(BASE_DIR))
 
 
 def read_seed_urls(config: dict) -> list[str]:
@@ -144,9 +168,7 @@ def read_seed_urls(config: dict) -> list[str]:
 def save_html(document_url: str, html: str, config: dict) -> str:
     """Salva HTML grezzo e ritorna il path relativo."""
     path = html_output_path(document_url, config)
-    ensure_parent_dir(path)
-    path.write_text(html, encoding="utf-8")
-    return relative_path(path)
+    return write_text(path, html)
 
 
 def append_jsonl(path: Path, record: dict) -> None:
@@ -154,6 +176,8 @@ def append_jsonl(path: Path, record: dict) -> None:
     ensure_parent_dir(path)
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
 
 
 def make_record(
@@ -200,9 +224,6 @@ def write_record(
     status_counts[record["status"]] += 1
     type_counts[record["type"]] += 1
 
-    if record["status"] == "redirected_out_of_scope":
-        return
-
     append_jsonl(output_file, record)
 
 
@@ -230,7 +251,7 @@ def load_checkpoint(config: dict) -> CrawlState | None:
         return None
 
     queue = deque(CrawlItem(**item) for item in data.get("queue", []))
-    queued = set(data.get("queued", [])) or {item.url for item in queue}
+    queued = {item.url for item in queue}
 
     return CrawlState(
         queue=queue,

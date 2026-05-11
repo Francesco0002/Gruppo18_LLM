@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -30,6 +30,11 @@ def now_iso() -> str:
 def content_hash(text: str) -> str:
     """Hash SHA-256 del contenuto testuale."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def relative_path(path: Path) -> str:
+    """Path relativo alla root progetto."""
+    return str(path.relative_to(BASE_DIR))
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -74,6 +79,31 @@ def latest_records_by_url(records: list[dict]) -> list[dict]:
     return [records[index] for index in latest_record_indexes(records)]
 
 
+def recent_successful_urls(manifest_path: Path, source: str, days: int) -> set[str]:
+    """URL processati con status ok negli ultimi `days` giorni."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    recent: set[str] = set()
+
+    for record in load_jsonl(manifest_path):
+        if record.get("source") != source or record.get("status") != "ok":
+            continue
+
+        last_crawled = record.get("last_crawled")
+        if not last_crawled:
+            continue
+
+        try:
+            crawled_at = datetime.fromisoformat(last_crawled)
+        except ValueError:
+            continue
+
+        if crawled_at >= cutoff:
+            recent.add(record.get("url", ""))
+
+    recent.discard("")
+    return recent
+
+
 def append_jsonl_batch(path: Path, records: list[dict]) -> None:
     """Aggiunge un batch JSONL con fsync per resilienza."""
     if not records:
@@ -87,10 +117,22 @@ def append_jsonl_batch(path: Path, records: list[dict]) -> None:
         os.fsync(file.fileno())
 
 
-def write_json(path: Path, data: dict) -> None:
-    """Scrive un JSON leggibile su disco."""
+def write_text_atomic(path: Path, text: str) -> None:
+    """Scrive testo in modo atomico tramite file temporaneo e replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    temp_path = path.with_name(path.name + ".tmp")
+
+    with temp_path.open("w", encoding="utf-8") as file:
+        file.write(text)
+        file.flush()
+        os.fsync(file.fileno())
+
+    temp_path.replace(path)
+
+
+def write_json(path: Path, data: dict) -> None:
+    """Scrive un JSON leggibile su disco in modo atomico."""
+    write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def write_jsonl_atomic(path: Path, records: list[dict]) -> None:
@@ -109,6 +151,5 @@ def write_jsonl_atomic(path: Path, records: list[dict]) -> None:
 
 def write_text(path: Path, text: str) -> str:
     """Scrive testo UTF-8 e ritorna un path relativo alla root progetto."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return str(path.relative_to(BASE_DIR))
+    write_text_atomic(path, text)
+    return relative_path(path)

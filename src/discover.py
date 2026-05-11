@@ -34,7 +34,7 @@ from discovery_io import (
     validate_config,
     write_record,
 )
-from discovery_models import CrawlItem, CrawlState
+from discovery_models import CrawlItem, CrawlState, ProcessedDiscoveryItem
 from discovery_processor import filter_context, process_item
 from url_filters import can_traverse_url, is_pdf_url
 
@@ -137,6 +137,28 @@ def enqueue_links(
         state.queued.add(link)
 
 
+def mark_same_batch_redirect_duplicates(processed_items: list[ProcessedDiscoveryItem]) -> None:
+    """Marca duplicati sullo stesso final_url emersi nello stesso batch."""
+    seen_final_urls: set[str] = set()
+
+    for processed in processed_items:
+        record = processed.record
+        if record.get("type") != "html" or not record.get("indexable", False):
+            continue
+
+        final_url = record.get("final_url")
+        if not final_url:
+            continue
+        if final_url in seen_final_urls:
+            record["status"] = "duplicate_redirect"
+            record["indexable"] = False
+            record["duplicate_of"] = final_url
+            record["raw_path"] = None
+            continue
+
+        seen_final_urls.add(final_url)
+
+
 async def run_discovery(config: dict) -> dict:
     """Esegue la discovery e ritorna statistiche finali."""
     seed_urls = read_seed_urls(config)
@@ -147,7 +169,10 @@ async def run_discovery(config: dict) -> dict:
     limiter = DomainRateLimiter(config["crawler"]["rate_limit_per_domain_rps"])
     robots = None
     if config["crawler"].get("respect_robots_txt", True):
-        robots = RobotsCache(config["crawler"]["user_agent"])
+        robots = RobotsCache(
+            config["crawler"]["user_agent"],
+            config["crawler"]["timeout"],
+        )
 
     status_counts: Counter[str] = Counter()
     type_counts: Counter[str] = Counter()
@@ -182,6 +207,7 @@ async def run_discovery(config: dict) -> dict:
                     for item in batch
                 ]
                 results = await asyncio.gather(*tasks)
+                mark_same_batch_redirect_duplicates(results)
 
                 for item, processed in zip(batch, results, strict=True):
                     record = processed.record
@@ -189,7 +215,10 @@ async def run_discovery(config: dict) -> dict:
                     for extra in processed.additional_visited:
                         mark_visited(state, extra)
 
-                    expand_links = True
+                    expand_links = record["status"] not in {
+                        "duplicate_canonical",
+                        "duplicate_redirect",
+                    }
                     if record["type"] == "html" and record["indexable"]:
                         document_url = record["document_url"]
                         if document_url in state.seen_documents:

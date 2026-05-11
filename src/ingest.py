@@ -27,10 +27,10 @@ from discover import run_discovery
 from discovery_io import load_config, project_path, validate_config
 from extract_pdf import run_extract_pdf
 from pipeline_io import (
-    BASE_DIR,
     latest_record_indexes,
     load_jsonl,
     now_iso,
+    relative_path,
     write_json,
     write_jsonl_atomic,
 )
@@ -51,21 +51,12 @@ def domain_from_record(record: dict) -> str:
 
 def is_duplicate_candidate(record: dict) -> bool:
     """True se il record può essere confrontato tramite content_hash."""
-    if record.get("status") != "ok":
-        return False
-    if not record.get("markdown_path"):
-        return False
-    if record.get("text_extracted") is False:
-        return False
-    return bool(record.get("content_hash"))
-
-
-def clear_duplicate_fields(record: dict) -> None:
-    """Rimuove marcature duplicato prima di ricalcolarle."""
-    record.pop("duplicate_of", None)
-    record.pop("duplicate_of_url", None)
-    record.pop("duplicate_reason", None)
-    record.pop("is_duplicate", None)
+    return (
+        record.get("status") == "ok"
+        and bool(record.get("markdown_path"))
+        and record.get("text_extracted") is not False
+        and bool(record.get("content_hash"))
+    )
 
 
 def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], list[dict], dict]:
@@ -74,7 +65,8 @@ def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], list[dict
 
     Il manifest è append-only: uno stesso URL può avere prima un failed e poi
     un ok. Le stats devono descrivere lo stato attuale, quindi i duplicati si
-    calcolano solo sull'ultimo record disponibile per ogni source+url.
+    calcolano solo sull'ultimo record disponibile per ogni source+url. A parità
+    di content_hash, il record canonico preferisce HTML rispetto a PDF.
     """
     first_by_content_hash: dict[str, dict] = {}
     updated_records = [dict(record) for record in records]
@@ -83,9 +75,15 @@ def mark_duplicate_documents(records: list[dict]) -> tuple[list[dict], list[dict
     unique_content_hashes = 0
 
     for record in updated_records:
-        clear_duplicate_fields(record)
+        for field in ("duplicate_of", "duplicate_of_url", "duplicate_reason", "is_duplicate"):
+            record.pop(field, None)
 
-    for index in current_indexes:
+    def duplicate_priority(index: int) -> tuple[int, str, int]:
+        record = updated_records[index]
+        source_priority = {"html": 0, "pdf": 1}.get(str(record.get("source")), 2)
+        return source_priority, str(record.get("last_crawled", "")), index
+
+    for index in sorted(current_indexes, key=duplicate_priority):
         record = updated_records[index]
         if not is_duplicate_candidate(record):
             continue
@@ -125,15 +123,16 @@ def markdown_char_stats(records: list[dict]) -> dict:
         if record.get("status") == "ok" and not record.get("is_duplicate", False)
     ]
 
-    if not values:
-        return {"min": 0, "max": 0, "avg": 0, "median": 0}
-
-    return {
-        "min": min(values),
-        "max": max(values),
-        "avg": round(mean(values), 2),
-        "median": median(values),
-    }
+    return (
+        {
+            "min": min(values),
+            "max": max(values),
+            "avg": round(mean(values), 2),
+            "median": median(values),
+        }
+        if values
+        else {"min": 0, "max": 0, "avg": 0, "median": 0}
+    )
 
 
 def build_discovery_stats(config: dict) -> dict:
@@ -202,7 +201,7 @@ def run_stats_path(config: dict, run_id: str) -> tuple[str, Path]:
     current_stats_path = project_path(config["paths"].get("processed_stats_file", "data/processed/stats.json"))
     runs_dir = current_stats_path.parent / "runs" / run_id
     run_path = runs_dir / "stats.json"
-    return str(run_path.relative_to(BASE_DIR)), run_path
+    return relative_path(run_path), run_path
 
 
 def write_stats(
@@ -218,7 +217,7 @@ def write_stats(
     stats = {
         "crawl_run_id": run_id,
         "generated_at": now_iso(),
-        "stats_file": str(stats_path.relative_to(BASE_DIR)),
+        "stats_file": relative_path(stats_path),
         "run_stats_file": run_stats_relative_path,
         "config": config_snapshot(config),
         "steps": step_stats,
@@ -248,6 +247,22 @@ def print_stats_summary(stats: dict) -> None:
     print(f"- run_stats_file: {stats['run_stats_file']}")
 
 
+async def run_pipeline_steps(config: dict) -> dict[str, dict]:
+    """Esegue gli step pesanti della pipeline e raccoglie le statistiche."""
+    step_stats: dict[str, dict] = {}
+
+    print("\n[1/5] Discovery")
+    step_stats["discover"] = await run_discovery(config)
+
+    print("\n[2/5] Scrape HTML")
+    step_stats["scrape"] = await run_scrape()
+
+    print("\n[3/5] Estrazione PDF")
+    step_stats["extract_pdf"] = run_extract_pdf()
+
+    return step_stats
+
+
 async def run_ingest(stats_only: bool = False) -> dict:
     """Esegue pipeline, marca documenti duplicati e genera stats."""
     config = load_config()
@@ -255,21 +270,14 @@ async def run_ingest(stats_only: bool = False) -> dict:
 
     run_id = make_run_id()
     manifest_path = project_path(config["paths"].get("processed_manifest_file", "data/processed/manifest.jsonl"))
-    step_stats: dict[str, dict] = {}
 
     print(f"Ingest avviato: {run_id}")
 
     if stats_only:
         print("Pipeline saltata: genero solo marcatura duplicati e stats dai file esistenti.")
+        step_stats: dict[str, dict] = {}
     else:
-        print("\n[1/5] Discovery")
-        step_stats["discover"] = await run_discovery(config)
-
-        print("\n[2/5] Scrape HTML")
-        step_stats["scrape"] = await run_scrape()
-
-        print("\n[3/5] Estrazione PDF")
-        step_stats["extract_pdf"] = run_extract_pdf()
+        step_stats = await run_pipeline_steps(config)
 
     duplicate_label = "[1/2]" if stats_only else "[4/5]"
     stats_label = "[2/2]" if stats_only else "[5/5]"

@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 
 from discovery_fetch import DomainRateLimiter, RobotsCache, fetch_discovery_candidate
 from discovery_io import make_record
-from discovery_models import CrawlItem, ProcessedDiscoveryItem
+from discovery_models import CrawlItem, FetchResult, ProcessedDiscoveryItem
 from html_utils import extract_canonical_from_soup, extract_links_from_soup
 from url_filters import can_index_url, can_traverse_url, is_pdf_url
 
@@ -39,7 +39,12 @@ def pick_document_url(
     config: dict,
     context: dict[str, str],
 ) -> tuple[str, str | None]:
-    """Usa canonical_url come chiave solo se resta nello scope della discovery."""
+    """Usa canonical_url come chiave solo se resta nello scope della discovery.
+
+    Se il canonical dichiarato esce dallo scope, deduplichiamo sul final_url:
+    è una scelta conservativa per non far collassare pagine in-scope diverse
+    su una chiave fuori perimetro.
+    """
     ok, reason = can_traverse_url(canonical_url, config, context)
     if ok:
         return canonical_url, None
@@ -83,6 +88,42 @@ def processed_item(
     )
 
 
+def make_pdf_record(item: CrawlItem, status: str, **extra: object) -> dict:
+    """Crea un record PDF con campi comuni coerenti."""
+    final_url = str(extra.pop("final_url", item.url))
+    return make_record(
+        item,
+        "pdf",
+        status,
+        final_url=final_url,
+        document_url=final_url,
+        raw_path=None,
+        **extra,
+    )
+
+
+def make_fetch_record(
+    item: CrawlItem,
+    source_type: str,
+    status: str,
+    final_url: str,
+    candidate: FetchResult,
+    **extra: object,
+) -> dict:
+    """Crea un record per esiti legati a una risposta HTTP già classificata."""
+    return make_record(
+        item,
+        source_type,
+        status,
+        final_url=final_url,
+        document_url=final_url,
+        content_type=candidate.content_type,
+        mime=candidate.mime,
+        raw_path=None,
+        **extra,
+    )
+
+
 async def make_linked_pdf_records(
     pdf_links: list[str],
     parent_url: str,
@@ -99,13 +140,10 @@ async def make_linked_pdf_records(
             status = "robots_denied"
 
         records.append(
-            make_record(
+            make_pdf_record(
                 item,
-                "pdf",
                 status,
                 final_url=pdf_url,
-                document_url=pdf_url,
-                raw_path=None,
                 discovery_method="html_link",
             )
         )
@@ -133,17 +171,9 @@ async def process_item(
     """
     if is_pdf_url(item.url):
         if robots and not await robots.can_fetch(item.url):
-            return processed_item(make_record(item, "pdf", "robots_denied"))
+            return processed_item(make_pdf_record(item, "robots_denied"))
 
-        record = make_record(
-            item,
-            "pdf",
-            "pending_download",
-            final_url=item.url,
-            document_url=item.url,
-            raw_path=None,
-        )
-        return processed_item(record)
+        return processed_item(make_pdf_record(item, "pending_download"))
 
     if robots and not await robots.can_fetch(item.url):
         return processed_item(make_record(item, "unknown", "robots_denied"))
@@ -160,59 +190,47 @@ async def process_item(
 
     ok_final, final_reason = can_traverse_url(final_url, config, context)
     if not ok_final:
-        record = make_record(
+        record = make_fetch_record(
             item,
             "other",
             "redirected_out_of_scope",
             final_url=final_url,
-            document_url=final_url,
-            content_type=candidate.content_type,
-            mime=candidate.mime,
+            candidate=candidate,
             skip_reason=final_reason,
-            raw_path=None,
         )
         return processed_item(record, additional_visited=additional_visited)
 
     if final_url in seen_documents:
-        record = make_record(
+        record = make_fetch_record(
             item,
             "html",
             "duplicate_redirect",
             final_url=final_url,
-            document_url=final_url,
-            content_type=candidate.content_type,
-            mime=candidate.mime,
+            candidate=candidate,
             duplicate_of=final_url,
-            raw_path=None,
         )
         return processed_item(record, additional_visited=additional_visited)
 
     if is_pdf_url(final_url) or candidate.mime == "application/pdf":
-        record = make_record(
+        record = make_pdf_record(
             item,
-            "pdf",
             "pending_download",
             final_url=final_url,
-            document_url=final_url,
             content_type=candidate.content_type,
             mime=candidate.mime,
-            raw_path=None,
         )
         return processed_item(record, additional_visited=additional_visited)
 
     if candidate.html is None:
         status = "too_large" if candidate.too_large else "non_html"
         source_type = "html" if candidate.too_large else "other"
-        record = make_record(
+        record = make_fetch_record(
             item,
             source_type,
             status,
             final_url=final_url,
-            document_url=final_url,
-            content_type=candidate.content_type,
-            mime=candidate.mime,
+            candidate=candidate,
             content_length=candidate.content_length,
-            raw_path=None,
         )
         return processed_item(record, additional_visited=additional_visited)
 

@@ -141,8 +141,15 @@ def is_pdf_url(url: str) -> bool:
     UNISA espone alcuni PDF tramite endpoint senza estensione, ad esempio
     /unisa-rescue-page/pdf/id/..., quindi non basta controllare ".pdf".
     """
-    path_parts = [part for part in urlparse(url).path.lower().split("/") if part]
-    return urlparse(url).path.lower().endswith(".pdf") or "pdf" in path_parts
+    path = urlparse(url).path.lower()
+    parts = path_segments(url)
+    is_unisa_pdf_endpoint = (
+        len(parts) >= 4
+        and parts[0] == "unisa-rescue-page"
+        and parts[1] == "pdf"
+        and parts[2] == "id"
+    )
+    return path.endswith(".pdf") or is_unisa_pdf_endpoint
 
 
 def is_metadata_url(url: str) -> bool:
@@ -196,7 +203,16 @@ def has_blocked_path(url: str) -> bool:
     host = parsed.netloc.lower()
     if "auth." in host or "login." in host:
         return True
-    if any(part in path for part in BLOCKED_PATH_PARTS):
+    normalized_path = "/" + "/".join(path_segments(url))
+    blocked_paths = {
+        "/" + part.strip("/").lower()
+        for part in BLOCKED_PATH_PARTS
+    }
+    if any(
+        normalized_path == blocked_path
+        or normalized_path.startswith(f"{blocked_path}/")
+        for blocked_path in blocked_paths
+    ):
         return True
     return Path(path).suffix in BLOCKED_EXTENSIONS
 

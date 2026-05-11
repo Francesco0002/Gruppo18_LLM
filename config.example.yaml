@@ -94,6 +94,5 @@ paths:
   discovered_urls_file: "data/discovered_urls.jsonl"
   checkpoint_file: "data/checkpoint.json"
   processed_markdown_dir: "data/processed/markdown"
-  processed_raw_markdown_dir: "data/processed/markdown_raw"
   processed_manifest_file: "data/processed/manifest.jsonl"
   processed_stats_file: "data/processed/stats.json"
