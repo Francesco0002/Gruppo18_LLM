@@ -18,6 +18,7 @@ src/
   extract_pdf.py          PDF -> Markdown raw + pulito
   ingest.py               Pipeline completa + duplicati + stats
   pipeline_io.py          Utility comuni per JSONL, hash e file
+  chunking.py             Markdown pulito -> chunk contestuali per RAG
   legacy/                 Prototipi non più usati
 
 data/                     Dati locali e output del crawl
@@ -66,12 +67,19 @@ Solo marcatura duplicati e statistiche su dati già prodotti:
 python src/ingest.py --stats-only
 ```
 
+Chunking dei Markdown puliti:
+```bash
+python src/chunking.py
+```
+
 Ripartenza pulita:
 
 ```bash
 make clean
 python src/ingest.py
 ```
+
+
 
 ## Documentazione
 

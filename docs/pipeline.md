@@ -17,6 +17,8 @@ extract_pdf.py
   -> raw markdown PDF + markdown pulito + manifest.jsonl
 ingest.py
   -> marcatura duplicati + stats.json corrente + storico run
+chunking.py
+  -> chunks.jsonl + stats.json dei chunk
 ```
 
 ## 1. Discovery
@@ -119,6 +121,14 @@ terrà solo lo stato corrente di ogni documento, poi indicizzerà solo record
 `status="ok"`, `indexable=true`, `text_extracted=true`, non duplicati e con
 `index_markdown_path` presente. `markdown_path` resta alias compatibile dello
 stesso file indicizzabile.
+
+## 5. Chunking
+
+Comando:
+
+```bash
+python src/chunking.py
+```
 
 ## Output Principali
 
