@@ -19,6 +19,7 @@ src/
   ingest.py               Pipeline completa + duplicati + stats
   pipeline_io.py          Utility comuni per JSONL, hash e file
   chunking.py             Markdown pulito -> chunk contestuali per RAG
+  vector_store.py         Chunk -> embedding -> Chroma vector store
   legacy/                 Prototipi non più usati
 
 data/                     Dati locali e output del crawl
@@ -68,8 +69,21 @@ python src/ingest.py --stats-only
 ```
 
 Chunking dei Markdown puliti:
+
 ```bash
 python src/chunking.py
+```
+
+Creazione del vector store Chroma:
+
+```bash
+python src/vector_store.py --reset
+```
+
+Query di test sul vector store:
+
+```bash
+python src/vector_store.py --query "Quali corsi di laurea offre il DIEM?"
 ```
 
 Ripartenza pulita:
@@ -93,7 +107,9 @@ docs/pipeline.md
 ## Note
 
 `data/processed/markdown/` contiene il Markdown pulito da indicizzare;
-`data/processed/raw_markdown/` conserva l'estrazione originale per debug.
+`data/processed/raw_markdown/` conserva l'estrazione originale per debug;
+`data/processed/chunks/` contiene i chunk contestuali prodotti per embedding e retrieval;
+`data/vectorstore/` contiene il vector store Chroma generato localmente.
 
 `config.yaml`, `.env`, virtual environment, file in `data/`, indici e API key
 non devono essere versionati su Git.

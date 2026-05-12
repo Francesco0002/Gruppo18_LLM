@@ -19,6 +19,8 @@ ingest.py
   -> marcatura duplicati + stats.json corrente + storico run
 chunking.py
   -> chunks.jsonl + stats.json dei chunk
+vector_store.py
+  -> embedding dei chunk + Chroma vector store
 ```
 
 ## 1. Discovery
@@ -130,6 +132,48 @@ Comando:
 python src/chunking.py
 ```
 
+Responsabilità:
+
+- legge data/processed/manifest.jsonl;
+- usa `pipeline_io.latest_records_by_url()` per considerare solo lo stato corrente del manifest append-only;
+- seleziona solo documenti con status="ok", indexable=true, text_extracted=true, non duplicati e con index_markdown_path presente;
+legge i Markdown puliti da data/processed/markdown/;
+- rimuove il front matter YAML iniziale, perché i metadati sono già presenti nel manifest;
+- rimuove eventuali header contestuali già presenti per evitare duplicazioni;
+- normalizza piccoli artefatti testuali prima del chunking;
+- divide i documenti prima per sezioni Markdown e poi, quando necessario, con split a dimensione controllata;
+- aggiunge a ogni chunk un header contestuale con titolo, breadcrumb e fonte;
+- salva i chunk in `data/processed/chunks/chunks.jsonl`;
+- salva statistiche del chunking in `data/processed/chunks/stats.json`.
+
+Ogni chunk conserva il testo da indicizzare insieme ai metadati principali del documento sorgente, tra cui chunk_id, document_hash, source_url, title, breadcrumb, chunk_index, text_hash e numero di caratteri.
+
+La fase successiva usa `chunks.jsonl` per generare gli embedding e popolare il vector store.
+
+## 6. Vecor Store
+
+Creazione del vector store:
+
+```bash
+python src/vector_store.py --reset
+```
+
+Query di test:
+```bash
+python src/vector_store.py --query "Quali corsi di laurea offre il DIEM?"
+```
+Responsabilità:
+
+- legge `data/processed/chunks/chunks.jsonl`;
+- converte ogni chunk in un documento LangChain con testo e metadati;
+- genera gli embedding tramite un modello HuggingFace multilingua;
+- indicizza i vettori nel database Chroma;
+- salva il vector store in `data/vectorstore/chroma/`;
+- salva statistiche in `data/vectorstore/stats.json`;
+- consente query semantiche di test tramite parametro --query.
+
+Il vector store non deve essere versionato su Git perché è un artefatto generato localmente.
+
 ## Output Principali
 
 | File / cartella | Contenuto |
@@ -143,6 +187,10 @@ python src/chunking.py
 | `data/processed/stats.json` | Ultime statistiche generate sullo stato corrente. |
 | `data/processed/runs/<crawl_run_id>/stats.json` | Copia storica delle statistiche di un run. |
 | `data/checkpoint.json` | Stato per riprendere la discovery. |
+| `data/processed/chunks/chunks.jsonl` | Chunk contestuali pronti per embedding e indicizzazione vettoriale. |
+| `data/processed/chunks/stats.json` | Statistiche del chunking: numero chunk, lunghezze, domini e documenti più frammentati. |
+| `data/vectorstore/chroma/` | Vector store Chroma generato dagli embedding dei chunk. |
+| `data/vectorstore/stats.json` | Statistiche del vector store e modello embedding usato. |
 
 ## Status Discovery
 
