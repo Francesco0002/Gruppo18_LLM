@@ -261,6 +261,20 @@ def is_diem_url(url: str, config: dict) -> bool:
     """True per il dominio principale DIEM."""
     return domain_of(url) == scope_value(config, "diem_domain", "www.diem.unisa.it")
 
+def is_directory_person_url(url: str, config: dict) -> bool:
+    """True solo per pagine personali della rubrica UNISA.
+
+    La rubrica viene usata come dominio ponte:
+    DIEM personale -> rubrica.unisa.it/persone?matricola=... -> docenti.unisa.it
+    """
+    parsed = urlparse(url)
+    directory_domain = scope_value(config, "directory_domain", "rubrica.unisa.it")
+
+    return (
+        parsed.netloc.lower() == directory_domain
+        and parsed.path.rstrip("/").lower() == "/persone"
+        and "matricola" in query_param_names(url)
+    )
 
 def configured_course_paths(config: dict) -> set[str]:
     """Percorsi corso ammessi come primo segmento di corsi.unisa.it.
@@ -302,6 +316,12 @@ def is_known_scope_source(source_url: str | None, config: dict) -> bool:
         or (domain == course_domain and course_has_allowed_identifier(source_url, config))
     )
 
+def is_directory_link_in_scope(url: str, source_url: str | None, config: dict) -> bool:
+    """Permette la rubrica solo come ponte da pagine già in scope."""
+    if not is_directory_person_url(url, config):
+        return False
+
+    return is_known_scope_source(source_url, config)
 
 def is_teacher_link_in_scope(url: str, source_url: str | None, config: dict) -> bool:
     """Permette ingresso da DIEM e navigazione interna allo stesso profilo docente."""
@@ -309,8 +329,15 @@ def is_teacher_link_in_scope(url: str, source_url: str | None, config: dict) -> 
         return False
     if is_diem_url(source_url, config):
         return True
+    
+    # Caso ponte:
+    # rubrica.unisa.it/persone?matricola=... -> docenti.unisa.it/nome.cognome
+    if is_directory_person_url(source_url, config):
+        return True
+    
     if domain_of(source_url) != scope_value(config, "teacher_domain", "docenti.unisa.it"):
         return False
+    
     return first_path_segment(source_url) == first_path_segment(url)
 
 
@@ -351,6 +378,12 @@ def is_in_scope_url(
 
     if is_diem_url(url, config):
         return True, "ok"
+    
+    directory_domain = scope_value(config, "directory_domain", "rubrica.unisa.it")
+    if domain == directory_domain:
+        if is_directory_link_in_scope(url, source_url, config):
+            return True, "ok"
+        return False, "scope_directory"
 
     teacher_domain = scope_value(config, "teacher_domain", "docenti.unisa.it")
     if domain == teacher_domain:
@@ -405,6 +438,12 @@ def can_index_url(
     ok, reason = can_traverse_url(url, config, context)
     if not ok:
         return False, reason
+
+    # La rubrica è solo un ponte verso docenti.unisa.it:
+    # la attraversiamo, ma non la indicizziamo.
+    if is_directory_person_url(url, config):
+        return False, "directory_bridge_not_indexable"
+
     if has_noisy_query(url):
         return False, "noisy_query"
 
