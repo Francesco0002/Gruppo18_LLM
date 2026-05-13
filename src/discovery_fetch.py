@@ -37,10 +37,12 @@ class DomainRateLimiter:
         self.delay = 1 / requests_per_second
         self.last_request: dict[str, float] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self._lock_creation_lock = asyncio.Lock()
 
     async def wait(self, domain: str) -> None:
         """Rispetta il delay configurato per il dominio."""
-        lock = self.locks.setdefault(domain, asyncio.Lock())
+        async with self._lock_creation_lock:
+            lock = self.locks.setdefault(domain, asyncio.Lock())
 
         async with lock:
             now = asyncio.get_running_loop().time()
@@ -62,6 +64,7 @@ class RobotsCache:
         self.timeout = timeout
         self.parsers: dict[str, RobotFileParser] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self._lock_creation_lock = asyncio.Lock()
 
     async def load_parser(self, domain: str) -> RobotFileParser:
         """Legge robots.txt con timeout esplicito e fallback permissivo."""
@@ -90,7 +93,8 @@ class RobotsCache:
     async def can_fetch(self, url: str) -> bool:
         """True se robots.txt permette di scaricare l'URL."""
         domain = urlparse(url).netloc
-        lock = self.locks.setdefault(domain, asyncio.Lock())
+        async with self._lock_creation_lock:
+            lock = self.locks.setdefault(domain, asyncio.Lock())
 
         async with lock:
             if domain not in self.parsers:
@@ -143,24 +147,29 @@ async def fetch_discovery_candidate(
                 html=None,
             )
 
-        body = await response.aread()
-        if len(body) > max_bytes:
-            return FetchResult(
-                final_url=normalize_url(str(response.url)),
-                content_type=content_type,
-                mime=mime,
-                content_length=len(body),
-                too_large=True,
-                html=None,
-            )
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                return FetchResult(
+                    final_url=normalize_url(str(response.url)),
+                    content_type=content_type,
+                    mime=mime,
+                    content_length=total,
+                    too_large=True,
+                    html=None,
+                )
+            chunks.append(chunk)
 
+        body = b"".join(chunks)
         return FetchResult(
             final_url=normalize_url(str(response.url)),
             content_type=content_type,
             mime=mime,
             content_length=len(body),
             too_large=False,
-            html=response.text,
+            html=body.decode("utf-8", errors="replace"),
         )
 
 

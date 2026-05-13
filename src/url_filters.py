@@ -106,8 +106,11 @@ BLOCKED_EXTENSIONS = {
 
 def normalize_url(url: str) -> str:
     """Normalizza un URL per ridurre duplicati banali."""
-    url, _ = urldefrag(url)
-    parsed = urlparse(url.strip())
+    stripped = url.strip()
+    if not stripped:
+        return ""
+    url, _ = urldefrag(stripped)
+    parsed = urlparse(url)
 
     path = parsed.path or "/"
     lowered_path = path.lower()
@@ -214,7 +217,7 @@ def has_blocked_path(url: str) -> bool:
         for blocked_path in blocked_paths
     ):
         return True
-    return Path(path).suffix in BLOCKED_EXTENSIONS
+    return Path(path).suffix.lower() in BLOCKED_EXTENSIONS
 
 
 def config_list(config: dict, section: str, key: str) -> list[str]:

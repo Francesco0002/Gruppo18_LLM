@@ -81,10 +81,17 @@ def mark_duplicate_documents(
         for field in ("duplicate_of", "duplicate_of_url", "duplicate_reason", "is_duplicate"):
             record.pop(field, None)
 
-    def duplicate_priority(index: int) -> tuple[int, str, int]:
+    from datetime import datetime as _dt
+
+    def duplicate_priority(index: int) -> tuple[int, _dt, int]:
         record = updated_records[index]
         source_priority = {"html": 0, "pdf": 1}.get(str(record.get("source")), 2)
-        return source_priority, str(record.get("last_crawled", "")), index
+        crawled_str = str(record.get("last_crawled", ""))
+        try:
+            crawled_dt = _dt.fromisoformat(crawled_str.replace("Z", "+00:00"))
+        except ValueError:
+            crawled_dt = _dt.min
+        return source_priority, crawled_dt, index
 
     for index in sorted(current_indexes, key=duplicate_priority):
         record = updated_records[index]
@@ -205,6 +212,7 @@ def run_stats_path(config: dict, run_id: str) -> tuple[str, Path]:
     """Path storico delle statistiche per uno specifico run."""
     current_stats_path = project_path(config["paths"].get("processed_stats_file", "data/processed/stats.json"))
     runs_dir = current_stats_path.parent / "runs" / run_id
+    runs_dir.mkdir(parents=True, exist_ok=True)
     run_path = runs_dir / "stats.json"
     return relative_path(run_path), run_path
 

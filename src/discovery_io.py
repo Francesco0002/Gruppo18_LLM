@@ -247,11 +247,21 @@ def load_checkpoint(config: dict) -> CrawlState | None:
     if not path.exists():
         return None
 
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Checkpoint file corrupted or unreadable: {exc}")
+        return None
+
     if data.get("completed", False):
         return None
 
-    queue = deque(CrawlItem(**item) for item in data.get("queue", []))
+    try:
+        queue = deque(CrawlItem(**item) for item in data.get("queue", []))
+    except (TypeError, KeyError) as exc:
+        print(f"Checkpoint queue item invalid: {exc}")
+        return None
+
     queued = {item.url for item in queue}
 
     return CrawlState(

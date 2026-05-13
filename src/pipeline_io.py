@@ -51,8 +51,12 @@ def load_jsonl(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8") as file:
         for line in file:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                print(f"Skipping malformed JSONL line: {exc}")
     return rows
 
 
@@ -98,7 +102,7 @@ def recent_successful_urls(manifest_path: Path, source: str, days: int) -> set[s
             continue
 
         try:
-            crawled_at = datetime.fromisoformat(last_crawled)
+            crawled_at = datetime.fromisoformat(last_crawled.replace("Z", "+00:00"))
         except ValueError:
             continue
 
@@ -125,14 +129,19 @@ def append_jsonl_batch(path: Path, records: list[dict]) -> None:
 def write_text_atomic(path: Path, text: str) -> None:
     """Scrive testo in modo atomico tramite file temporaneo e replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(path.name + ".tmp")
+    import uuid
+    temp_path = path.with_name(path.name + f".tmp.{uuid.uuid4().hex}")
 
-    with temp_path.open("w", encoding="utf-8") as file:
-        file.write(text)
-        file.flush()
-        os.fsync(file.fileno())
+    try:
+        with temp_path.open("w", encoding="utf-8") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
 
-    temp_path.replace(path)
+        temp_path.replace(path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def write_json(path: Path, data: dict) -> None:

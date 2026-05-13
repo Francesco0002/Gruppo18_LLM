@@ -112,7 +112,11 @@ def load_recorded_pdf_urls(output_file: Path) -> set[str]:
         for line in file:
             if not line.strip():
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"Skipping malformed line in discovered_urls.jsonl: {exc}")
+                continue
             url = record.get("url")
             if record.get("type") == "pdf" or (url and is_pdf_url(url)):
                 urls.add(url)

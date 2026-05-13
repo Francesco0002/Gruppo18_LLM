@@ -46,6 +46,9 @@ def pick_document_url(
     è una scelta conservativa per non far collassare pagine in-scope diverse
     su una chiave fuori perimetro.
     """
+    if not canonical_url or not canonical_url.startswith(("http://", "https://")):
+        return final_url, "no_canonical"
+
     ok, reason = can_traverse_url(canonical_url, config, context)
     if ok:
         return canonical_url, None
@@ -171,6 +174,11 @@ async def process_item(
     che vengano pescati dalla coda BFS.
     """
     if is_pdf_url(item.url):
+        ok, reason = can_traverse_url(item.url, config, context)
+        if not ok:
+            return processed_item(
+                make_pdf_record(item, "out_of_scope", skip_reason=reason)
+            )
         if robots and not await robots.can_fetch(item.url):
             return processed_item(make_pdf_record(item, "robots_denied"))
 
