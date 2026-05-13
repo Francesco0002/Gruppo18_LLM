@@ -20,6 +20,7 @@ src/
   pipeline_io.py          Utility comuni per JSONL, hash e file
   chunking.py             Markdown pulito -> chunk contestuali per RAG
   vector_store.py         Chunk -> embedding -> Chroma vector store
+  retrieval.py            Retrieval ibrido BM25 + dense + RRF
   legacy/                 Prototipi non più usati
 
 data/                     Dati locali e output del crawl
@@ -86,6 +87,12 @@ Query di test sul vector store:
 python src/vector_store.py --query "Quali corsi di laurea offre il DIEM?"
 ```
 
+Retrieval ibrido BM25 + dense:
+
+```bash
+python src/retrieval.py --query "Quali corsi di laurea offre il DIEM?"
+```
+
 Ripartenza pulita:
 
 ```bash
@@ -110,6 +117,13 @@ docs/pipeline.md
 `data/processed/raw_markdown/` conserva l'estrazione originale per debug;
 `data/processed/chunks/` contiene i chunk contestuali prodotti per embedding e retrieval;
 `data/vectorstore/` contiene il vector store Chroma generato localmente.
+
+Il modulo `src/retrieval.py` implementa il retrieval ibrido combinando:
+- BM25, per ricerca lessicale basata su parole chiave;
+- dense retrieval, tramite embedding e Chroma;
+- Reciprocal Rank Fusion, per fondere i ranking;
+- deduplica per URL;
+- rerank leggero basato sui metadati, utile per favorire pagine pertinenti in base alla query.
 
 `config.yaml`, `.env`, virtual environment, file in `data/`, indici e API key
 non devono essere versionati su Git.

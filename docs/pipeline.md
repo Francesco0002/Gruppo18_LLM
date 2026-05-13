@@ -21,6 +21,8 @@ chunking.py
   -> chunks.jsonl + stats.json dei chunk
 vector_store.py
   -> embedding dei chunk + Chroma vector store
+retrieval.py
+  -> BM25 + dense retrieval + fusione RRF dei risultati
 ```
 
 ## 1. Discovery
@@ -150,7 +152,7 @@ Ogni chunk conserva il testo da indicizzare insieme ai metadati principali del d
 
 La fase successiva usa `chunks.jsonl` per generare gli embedding e popolare il vector store.
 
-## 6. Vecor Store
+## 6. Vector Store
 
 Creazione del vector store:
 
@@ -173,6 +175,45 @@ Responsabilità:
 - consente query semantiche di test tramite parametro --query.
 
 Il vector store non deve essere versionato su Git perché è un artefatto generato localmente.
+
+## 7. Retrieval Ibrido
+
+Comando:
+
+```bash
+python src/retrieval.py --query "Quali corsi di laurea offre il DIEM?"
+```
+Comando con numero finale di risultati personalizzato:
+
+```bash
+python src/retrieval.py --query "Quali sono gli orari di ricevimento del professor Mario Vento?" --final-k 3
+```
+Responsabilità:
+
+- legge i chunk da `data/processed/chunks/chunks.jsonl`;
+- esegue retrieval lessicale tramite BM25;
+esegue dense retrieval tramite il vector store Chroma creato da `vector_store.py`;
+- combina i risultati dei due retriever tramite Reciprocal Rank Fusion;
+- rimuove risultati ridondanti provenienti dallo stesso URL;
+- applica un rerank leggero basato sui metadati e sul tipo di query;
+- stampa i chunk finali con titolo, URL, breadcrumb, chunk ID e anteprima del contenuto.
+
+Il retrieval ibrido migliora la robustezza rispetto alla sola ricerca vettoriale:
+
+- BM25 è utile per nomi propri, docenti, sigle, codici corso, URL e parole chiave esatte;
+- il dense retrieval è utile per domande formulate in linguaggio naturale e semanticamente simili ai documenti;
+- la fusione RRF evita di confrontare direttamente score eterogenei prodotti da BM25 e Chroma.
+
+Il rerank leggero sui metadati gestisce alcuni casi frequenti:
+
+- domande su corsi di laurea e offerta formativa;
+- domande sugli orari di ricevimento di un docente specifico;
+- domande generiche sulla didattica;
+- penalizzazione di pagine in lingua inglese quando la query è in italiano;
+- penalizzazione di pagine relative ad anni accademici vecchi se la query non specifica un anno;
+- deduplica dei risultati provenienti dallo stesso URL.
+
+Questa fase non genera ancora la risposta finale: produce i chunk più rilevanti che saranno poi forniti al modello LLM nella fase RAG completa.
 
 ## Output Principali
 
