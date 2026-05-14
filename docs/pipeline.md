@@ -23,6 +23,10 @@ vector_store.py
   -> embedding dei chunk + Chroma vector store
 retrieval.py
   -> BM25 + dense retrieval + fusione RRF dei risultati
+rag_chain.py
+  -> prompt RAG + generazione risposta con LLM locale
+chatbot.py
+  -> interfaccia CLI per interrogare il chatbot
 ```
 
 ## 1. Discovery
@@ -192,7 +196,7 @@ Responsabilità:
 
 - legge i chunk da `data/processed/chunks/chunks.jsonl`;
 - esegue retrieval lessicale tramite BM25;
-esegue dense retrieval tramite il vector store Chroma creato da `vector_store.py`;
+- esegue dense retrieval tramite il vector store Chroma creato da `vector_store.py`;
 - combina i risultati dei due retriever tramite Reciprocal Rank Fusion;
 - rimuove risultati ridondanti provenienti dallo stesso URL;
 - applica un rerank leggero basato sui metadati e sul tipo di query;
@@ -214,6 +218,55 @@ Il rerank leggero sui metadati gestisce alcuni casi frequenti:
 - deduplica dei risultati provenienti dallo stesso URL.
 
 Questa fase non genera ancora la risposta finale: produce i chunk più rilevanti che saranno poi forniti al modello LLM nella fase RAG completa.
+
+## 8. RAG Generation
+
+Comando:
+
+```bash
+python src/chatbot.py
+```
+
+Comando con modello e numero di chunk personalizzati:
+
+```bash
+python src/chatbot.py --model llama3.2:3b --final-k 3
+```
+
+Responsabilità:
+
+- riceve una domanda utente da terminale;
+- usa `retrieval.py` per recuperare i chunk più rilevanti dal corpus DIEM;
+- costruisce un contesto compatto usando titolo, URL, breadcrumb, chunk ID e contenuto dei chunk;
+- genera un prompt RAG vincolato alle fonti recuperate;
+- invia il prompt a un modello instruct locale tramite Ollama;
+- restituisce una risposta in italiano insieme alle fonti utilizzate.
+
+La generazione avviene tramite il modulo `src/rag_chain.py`, che implementa la pipeline:
+
+```text
+domanda utente
+  -> hybrid retrieval
+  -> costruzione contesto
+  -> prompt RAG
+  -> chiamata Ollama
+  -> risposta + fonti
+```
+
+Il prompt impone al modello di usare esclusivamente il contesto fornito.
+Se il contesto non contiene informazioni sufficienti, il chatbot deve dichiarare che l'informazione non è disponibile nelle fonti DIEM indicizzate.
+Se la domanda è fuori dominio rispetto al DIEM, il chatbot deve segnalarlo invece di produrre una risposta non fondata.
+
+Le variabili principali sono configurate tramite `.env`:
+
+```env
+OLLAMA_MODEL=llama3.2:3b
+OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+RAG_FINAL_K=3
+RAG_MAX_CONTEXT_CHARS=6000
+```
+
+Questa fase completa la pipeline RAG end-to-end: i chunk recuperati dal retrieval ibrido vengono usati come contesto per generare una risposta controllata e accompagnata dalle fonti.
 
 ## Output Principali
 
