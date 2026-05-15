@@ -239,3 +239,5 @@ logs/
 /config.yaml
 
 tests/test_bugfixes.py
+
+data/vectorstore/
