@@ -46,7 +46,20 @@ Responsabilità:
 - rispetta `robots.txt` se `respect_robots_txt: true`;
 - salva HTML grezzo in `data/raw_html/<sh>/<hash>.html`;
 - scrive `data/discovered_urls.jsonl`;
-- salva `data/checkpoint.json` per riprendere un crawl interrotto.
+- salva `data/checkpoint.json` per riprendere un crawl interrotto;
+- salva `data/discovery_state.json` per mantenere tra run la frontier non ancora
+  visitata e la memoria degli URL/documenti già noti;
+- applica `refresh_after_days` per ricontrollare periodicamente URL già visti
+  senza consumare sempre il budget sui medesimi URL recenti.
+
+`checkpoint.json` è uno stato intra-run: se il processo si interrompe, permette
+di riprendere la stessa esecuzione. `discovery_state.json` è invece uno stato
+inter-run: conserva la frontier residua e la memoria cumulativa necessaria a
+proseguire la copertura in run successive. I limiti `max_total_urls` e
+`per_domain_limits` restano budget del singolo run, non contatori globali.
+`discovered_urls.jsonl` resta lo snapshot degli URL prodotti dalla run corrente:
+serve come input immediato agli step di scraping HTML ed estrazione PDF, mentre
+la memoria cumulativa vive in `discovery_state.json`.
 
 I PDF linkati dagli HTML vengono registrati subito in
 `discovered_urls.jsonl`. Se `robots.txt` consente il download, ricevono
@@ -127,8 +140,7 @@ La futura fase di indexing userà la stessa regola tramite
 `pipeline_io.latest_records_by_url()`: leggerà lo storico `manifest.jsonl`,
 terrà solo lo stato corrente di ogni documento, poi indicizzerà solo record
 `status="ok"`, `indexable=true`, `text_extracted=true`, non duplicati e con
-`index_markdown_path` presente. `markdown_path` resta alias compatibile dello
-stesso file indicizzabile.
+`index_markdown_path` presente.
 
 ## 5. Chunking
 
@@ -310,8 +322,8 @@ Questa fase completa la pipeline RAG end-to-end: i chunk recuperati dal retrieva
 
 ## Note Operative
 
-Ogni record processed conserva `raw_markdown_path`, `clean_markdown_path`,
-`index_markdown_path` e `markdown_path`. I campi di qualità
+Ogni record processed conserva `raw_markdown_path` e `index_markdown_path`.
+I campi di qualità
 (`clean_status`, `clean_warnings`, `raw_markdown_chars`,
 `clean_markdown_chars`, `removed_chars_ratio`) descrivono quanto è stata
 modificata l'estrazione raw.

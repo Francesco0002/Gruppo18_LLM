@@ -76,9 +76,7 @@ class ProcessedRecord(TypedDict, total=False):
     hash: str
     content_hash: str | None
     raw_content_hash: str | None
-    markdown_path: str | None
     raw_markdown_path: str | None
-    clean_markdown_path: str | None
     index_markdown_path: str | None
     raw_html_path: str | None
     raw_pdf_path: str | None

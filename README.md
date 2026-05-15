@@ -42,7 +42,7 @@ cp .env.example .env
 ```
 
 Modifica `config.yaml` per impostare limiti di crawl, domini ammessi,
-profondità, rate limit e path degli output.
+profondità, rate limit, refresh degli URL già noti e path degli output.
 
 Modifica `.env` per impostare il modello Ollama usato nella fase RAG:
 

@@ -8,6 +8,7 @@ Questo script orchestra il primo step della pipeline:
 4. salva l'HTML grezzo in data/raw_html/<sh>/<hash>.html
 5. scrive gli URL scoperti in data/discovered_urls.jsonl
 6. aggiorna data/checkpoint.json per poter riprendere un crawl interrotto
+7. aggiorna data/discovery_state.json per continuare la frontier tra run
 
 La logica di processing del singolo URL vive in discovery_processor.py.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import Counter, deque
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -27,34 +29,82 @@ from discovery_fetch import DomainRateLimiter, RobotsCache, fetch_sitemap_urls
 from discovery_io import (
     load_checkpoint,
     load_config,
+    load_discovery_state,
     project_path,
     read_seed_urls,
     save_checkpoint,
+    save_discovery_state,
     save_html,
     validate_config,
     write_record,
 )
-from discovery_models import CrawlItem, CrawlState, ProcessedDiscoveryItem
+from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState, ProcessedDiscoveryItem
 from discovery_processor import filter_context, process_item
+from pipeline_io import now_iso
 from url_filters import can_traverse_url, is_pdf_url
 
 
-def create_initial_state(seed_urls: list[str], sitemap_urls: list[str]) -> CrawlState:
-    """Crea la coda iniziale della BFS da seed + sitemap."""
-    initial_urls = list(dict.fromkeys(seed_urls + sitemap_urls))
-    queue = deque(CrawlItem(url, 0, "seed") for url in initial_urls)
+def create_initial_state(
+    seed_urls: list[str],
+    sitemap_urls: list[str],
+    persistent_state: PersistentDiscoveryState | None = None,
+) -> CrawlState:
+    """Crea la BFS da frontier persistita, seed e sitemap."""
+    persistent_state = persistent_state or PersistentDiscoveryState(deque(), {}, {})
+    initial_items = list(persistent_state.frontier)
+    initial_items.extend(CrawlItem(url, 0, "seed") for url in seed_urls)
+    initial_items.extend(CrawlItem(url, 0, "sitemap") for url in sitemap_urls)
+
+    deduped_items: list[CrawlItem] = []
+    seen_urls: set[str] = set()
+    for item in initial_items:
+        if item.url in seen_urls:
+            continue
+        deduped_items.append(item)
+        seen_urls.add(item.url)
+
+    queue = deque(deduped_items)
     return CrawlState(
         queue=queue,
-        queued=set(initial_urls),
+        queued={item.url for item in queue},
         visited=set(),
         seen_documents=set(),
         domain_counts=Counter(),
+        known_urls=dict(persistent_state.known_urls),
+        known_documents=dict(persistent_state.known_documents),
     )
 
 
-def can_visit(item: CrawlItem, state: CrawlState, config: dict) -> bool:
+def is_due_for_refresh(last_seen: str | None, config: dict, reference_time: datetime | None = None) -> bool:
+    """True se un URL noto può essere ricontrollato."""
+    if not last_seen:
+        return True
+
+    try:
+        seen_at = datetime.fromisoformat(last_seen)
+    except ValueError:
+        return True
+
+    refresh_after_days = int(config["crawler"].get("refresh_after_days", 7))
+    now = reference_time or datetime.now(UTC)
+    return seen_at <= now - timedelta(days=refresh_after_days)
+
+
+def can_visit(
+    item: CrawlItem,
+    state: CrawlState,
+    config: dict,
+    reference_time: datetime | None = None,
+) -> bool:
     """True se l'URL può essere inserito nel prossimo batch."""
     if item.url in state.visited:
+        return False
+
+    if item.url in state.known_urls and not is_due_for_refresh(
+        state.known_urls[item.url],
+        config,
+        reference_time,
+    ):
         return False
 
     ok, _ = can_traverse_url(item.url, config, filter_context(item.discovered_from))
@@ -69,19 +119,25 @@ def can_visit(item: CrawlItem, state: CrawlState, config: dict) -> bool:
     return len(state.visited) < config["crawler"]["max_total_urls"]
 
 
-def mark_visited(state: CrawlState, url: str) -> bool:
+def mark_visited(state: CrawlState, url: str, visited_at: str | None = None) -> bool:
     """Marca un URL visitato e aggiorna il contatore del suo dominio."""
     if url in state.visited:
         return False
 
     state.visited.add(url)
+    state.known_urls[url] = visited_at or now_iso()
     domain = urlparse(url).netloc
     if domain:
         state.domain_counts[domain] += 1
     return True
 
 
-def take_batch(state: CrawlState, config: dict) -> list[CrawlItem]:
+def take_batch(
+    state: CrawlState,
+    config: dict,
+    reference_time: datetime | None = None,
+    visited_at: str | None = None,
+) -> list[CrawlItem]:
     """Prende dalla coda un batch di URL validi da scaricare."""
     batch: list[CrawlItem] = []
     batch_size = config["crawler"]["max_concurrent_requests"]
@@ -93,10 +149,10 @@ def take_batch(state: CrawlState, config: dict) -> list[CrawlItem]:
         # queued rappresenta solo gli URL ancora presenti nella coda BFS.
         state.queued.discard(item.url)
 
-        if not can_visit(item, state, config):
+        if not can_visit(item, state, config, reference_time):
             continue
 
-        mark_visited(state, item.url)
+        mark_visited(state, item.url, visited_at)
         batch.append(item)
 
     return batch
@@ -136,6 +192,8 @@ def enqueue_links(
 
     for link in links:
         if link in state.visited or link in state.queued:
+            continue
+        if link in state.known_urls and not is_due_for_refresh(state.known_urls[link], config):
             continue
         state.queue.append(CrawlItem(link, parent.depth + 1, parent.url))
         state.queued.add(link)
@@ -180,6 +238,10 @@ async def run_discovery(config: dict) -> dict:
 
     status_counts: Counter[str] = Counter()
     type_counts: Counter[str] = Counter()
+    run_started_at = now_iso()
+    reference_time = datetime.fromisoformat(run_started_at)
+    persistent_state = load_discovery_state(config)
+    frontier_loaded = len(persistent_state.frontier)
 
     async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
         state = load_checkpoint(config)
@@ -188,9 +250,14 @@ async def run_discovery(config: dict) -> dict:
             output_file.unlink(missing_ok=True)
             recorded_pdf_urls: set[str] = set()
             sitemap_urls = await fetch_sitemap_urls(client, config, limiter)
-            state = create_initial_state(seed_urls, sitemap_urls)
+            state = create_initial_state(seed_urls, sitemap_urls, persistent_state)
         else:
             print("Checkpoint trovato: riprendo il crawl precedente.")
+            state.known_urls = {**persistent_state.known_urls, **state.known_urls}
+            state.known_documents = {
+                **persistent_state.known_documents,
+                **state.known_documents,
+            }
             recorded_pdf_urls = load_recorded_pdf_urls(output_file)
 
         max_total_urls = config["crawler"]["max_total_urls"]
@@ -202,7 +269,7 @@ async def run_discovery(config: dict) -> dict:
             dynamic_ncols=True,
         ) as progress:
             while state.queue and len(state.visited) < max_total_urls:
-                batch = take_batch(state, config)
+                batch = take_batch(state, config, reference_time, run_started_at)
                 if not batch:
                     break
 
@@ -233,6 +300,7 @@ async def run_discovery(config: dict) -> dict:
                             expand_links = False
                         else:
                             state.seen_documents.add(document_url)
+                            state.known_documents[document_url] = run_started_at
                             record["raw_path"] = save_html(document_url, processed.html or "", config)
 
                     write_record(output_file, record, status_counts, type_counts)
@@ -259,6 +327,7 @@ async def run_discovery(config: dict) -> dict:
                 )
 
     save_checkpoint(state, config, completed=True)
+    save_discovery_state(state, config)
 
     return {
         "seed_urls": len(seed_urls),
@@ -268,9 +337,14 @@ async def run_discovery(config: dict) -> dict:
         "by_domain": dict(state.domain_counts),
         "by_status": dict(status_counts),
         "by_type": dict(type_counts),
+        "frontier_loaded": frontier_loaded,
+        "frontier_remaining": len(state.queue),
+        "known_urls": len(state.known_urls),
+        "known_documents": len(state.known_documents),
         "output_file": config["paths"]["discovered_urls_file"],
         "raw_html_dir": config["paths"]["raw_html_dir"],
         "checkpoint_file": config["paths"]["checkpoint_file"],
+        "discovery_state_file": config["paths"]["discovery_state_file"],
     }
 
 
@@ -283,8 +357,10 @@ def print_config_summary(config: dict) -> None:
     print(f"- max_total_urls: {crawler['max_total_urls']}")
     print(f"- max_depth: {crawler['max_depth']}")
     print(f"- max_concurrent_requests: {crawler['max_concurrent_requests']}")
+    print(f"- refresh_after_days: {crawler.get('refresh_after_days', 7)}")
     print(f"- raw_html_dir: {paths['raw_html_dir']}")
     print(f"- discovered_urls_file: {paths['discovered_urls_file']}")
+    print(f"- discovery_state_file: {paths['discovery_state_file']}")
     print()
 
 

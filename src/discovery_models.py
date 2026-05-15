@@ -11,7 +11,7 @@ I modelli tengono separati i contratti dati dalla logica:
 from __future__ import annotations
 
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pipeline_types import DiscoveryRecord
 
@@ -34,6 +34,17 @@ class CrawlState:
     visited: set[str]
     seen_documents: set[str]
     domain_counts: Counter[str]
+    known_urls: dict[str, str] = field(default_factory=dict)
+    known_documents: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class PersistentDiscoveryState:
+    """Memoria della discovery condivisa tra run completati."""
+
+    frontier: deque[CrawlItem]
+    known_urls: dict[str, str]
+    known_documents: dict[str, str]
 
 
 @dataclass

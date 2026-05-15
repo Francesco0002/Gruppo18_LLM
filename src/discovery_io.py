@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 import yaml
 from dotenv import load_dotenv
 
-from discovery_models import CrawlItem, CrawlState
+from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState
 from pipeline_io import BASE_DIR, relative_path, write_json, write_text
 from pipeline_types import DiscoveryRecord
 from url_filters import can_traverse_url, normalize_url
@@ -67,6 +67,7 @@ def validate_config(config: dict) -> None:
         "raw_html_dir",
         "discovered_urls_file",
         "checkpoint_file",
+        "discovery_state_file",
     ]
     required_scope = [
         "diem_domain",
@@ -111,6 +112,9 @@ def validate_config(config: dict) -> None:
 
     if config["crawler"]["max_html_bytes"] <= 0:
         raise ValueError("crawler.max_html_bytes deve essere > 0.")
+
+    if config["crawler"].get("refresh_after_days", 0) < 0:
+        raise ValueError("crawler.refresh_after_days deve essere >= 0.")
 
     allowed_domains = {
         str(domain).lower()
@@ -237,6 +241,8 @@ def save_checkpoint(state: CrawlState, config: dict, completed: bool) -> None:
         "visited": sorted(state.visited),
         "seen_documents": sorted(state.seen_documents),
         "domain_counts": dict(state.domain_counts),
+        "known_urls": state.known_urls,
+        "known_documents": state.known_documents,
     }
     write_json(project_path(config["paths"]["checkpoint_file"]), checkpoint)
 
@@ -270,4 +276,45 @@ def load_checkpoint(config: dict) -> CrawlState | None:
         visited=set(data.get("visited", [])),
         seen_documents=set(data.get("seen_documents", [])),
         domain_counts=Counter(data.get("domain_counts", {})),
+        known_urls=dict(data.get("known_urls", {})),
+        known_documents=dict(data.get("known_documents", {})),
     )
+
+
+def empty_persistent_state() -> PersistentDiscoveryState:
+    """Ritorna uno stato persistente iniziale vuoto."""
+    return PersistentDiscoveryState(
+        frontier=deque(),
+        known_urls={},
+        known_documents={},
+    )
+
+
+def load_discovery_state(config: dict) -> PersistentDiscoveryState:
+    """Carica la memoria della discovery tra run completati."""
+    path = project_path(config["paths"]["discovery_state_file"])
+    if not path.exists():
+        return empty_persistent_state()
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        frontier = deque(CrawlItem(**item) for item in data.get("frontier", []))
+    except (json.JSONDecodeError, OSError, TypeError, KeyError) as exc:
+        print(f"Discovery state corrupted or unreadable: {exc}")
+        return empty_persistent_state()
+
+    return PersistentDiscoveryState(
+        frontier=frontier,
+        known_urls=dict(data.get("known_urls", {})),
+        known_documents=dict(data.get("known_documents", {})),
+    )
+
+
+def save_discovery_state(state: CrawlState, config: dict) -> None:
+    """Salva frontier e memoria cumulativa per il run successivo."""
+    discovery_state = {
+        "frontier": [asdict(item) for item in state.queue],
+        "known_urls": state.known_urls,
+        "known_documents": state.known_documents,
+    }
+    write_json(project_path(config["paths"]["discovery_state_file"]), discovery_state)

@@ -156,9 +156,7 @@ def build_manifest_record(
         manifest_record.update(
             content_hash=None,
             raw_content_hash=None,
-            markdown_path=None,
             raw_markdown_path=None,
-            clean_markdown_path=None,
             index_markdown_path=None,
             raw_pdf_path=download.get("raw_pdf_path"),
             content_length=download.get("content_length"),
@@ -172,9 +170,7 @@ def build_manifest_record(
         manifest_record.update(
             content_hash=None,
             raw_content_hash=None,
-            markdown_path=None,
             raw_markdown_path=None,
-            clean_markdown_path=None,
             index_markdown_path=None,
             raw_pdf_path=download.get("raw_pdf_path"),
             text_extracted=False,
@@ -209,9 +205,7 @@ def build_manifest_record(
     manifest_record.update(
         content_hash=content_hash(clean_body),
         raw_content_hash=content_hash(markdown),
-        markdown_path=markdown_output,
         raw_markdown_path=raw_output_path,
-        clean_markdown_path=markdown_output,
         index_markdown_path=markdown_output,
         raw_pdf_path=download.get("raw_pdf_path"),
         text_extracted=text_extracted,

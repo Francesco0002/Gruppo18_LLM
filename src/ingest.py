@@ -54,7 +54,7 @@ def is_duplicate_candidate(record: ProcessedRecord) -> bool:
     """True se il record può essere confrontato tramite content_hash."""
     return (
         record.get("status") == "ok"
-        and bool(record.get("markdown_path"))
+        and bool(record.get("index_markdown_path"))
         and record.get("text_extracted") is not False
         and bool(record.get("content_hash"))
     )
@@ -168,7 +168,7 @@ def build_processed_stats(
         record
         for record in records
         if record.get("status") == "ok"
-        and record.get("markdown_path")
+        and record.get("index_markdown_path")
         and not record.get("is_duplicate", False)
         and record.get("text_extracted") is not False
         and record.get("indexable", True) is not False

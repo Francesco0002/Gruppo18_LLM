@@ -13,7 +13,7 @@ help:
 	@echo "  scrape          Converte gli HTML scoperti in Markdown."
 	@echo "  extract-pdf     Scarica ed estrae i PDF scoperti."
 	@echo "  ingest          Esegue pipeline completa, marca duplicati e genera stats."
-	@echo "  clean           Rimuove gli output del crawl (raw_html, jsonl, checkpoint)."
+	@echo "  clean           Rimuove gli output del crawl (raw_html, jsonl, stati)."
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -31,4 +31,4 @@ ingest:
 	$(PY) src/ingest.py
 
 clean:
-	rm -rf data/raw_html data/raw_pdf data/processed data/discovered_urls.jsonl data/checkpoint.json
+	rm -rf data/raw_html data/raw_pdf data/processed data/discovered_urls.jsonl data/checkpoint.json data/discovery_state.json

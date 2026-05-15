@@ -227,6 +227,7 @@ data/raw_pdf/
 data/processed/
 data/discovered_urls.jsonl
 data/checkpoint.json
+data/discovery_state.json
 
 # Log della pipeline
 logs/
