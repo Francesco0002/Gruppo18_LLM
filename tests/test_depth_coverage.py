@@ -60,6 +60,20 @@ class DepthCoverageTests(unittest.TestCase):
         self.assertEqual(coverage["verdict"], "incomplete")
         self.assertEqual(coverage["blocking_reasons"], ["stop_reason:no_eligible_urls"])
 
+    def test_reexpansion_backlog_keeps_next_depth_unsealed(self) -> None:
+        coverage = build_depth_coverage(
+            max_depth=2,
+            frontier_by_depth={},
+            checkpoint_status="completed",
+            stop_reason="queue_exhausted",
+            reexpansion_by_depth={"1": 2},
+        )
+
+        self.assertTrue(coverage["depths"][1]["complete"])
+        self.assertFalse(coverage["depths"][2]["sealed"])
+        self.assertEqual(coverage["depths"][1]["pending_reexpansion_at_depth"], 2)
+        self.assertEqual(coverage["blocking_reasons"], ["reexpansion_not_drained"])
+
     def test_depth_progresses_across_simulated_runs(self) -> None:
         run_one = build_depth_coverage(
             max_depth=2,

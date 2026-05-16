@@ -4,6 +4,8 @@ Dataclass condivise dalla fase di discovery.
 I modelli tengono separati i contratti dati dalla logica:
 - CrawlItem rappresenta un URL nella coda BFS;
 - CrawlState rappresenta lo stato persistito nel checkpoint;
+- PersistentDiscoveryState conserva anche le pagine di bordo da riespandere
+  quando una run successiva aumenta max_depth;
 - FetchResult rappresenta una risposta HTTP già classificata;
 - ProcessedDiscoveryItem rappresenta l'esito del processing di un URL.
 """
@@ -23,6 +25,7 @@ class CrawlItem:
     url: str
     depth: int
     discovered_from: str
+    force_revisit: bool = False
 
 
 @dataclass
@@ -36,6 +39,7 @@ class CrawlState:
     domain_counts: Counter[str]
     known_urls: dict[str, str] = field(default_factory=dict)
     known_documents: dict[str, str] = field(default_factory=dict)
+    expansion_backlog: dict[str, CrawlItem] = field(default_factory=dict)
 
 
 @dataclass
@@ -45,6 +49,7 @@ class PersistentDiscoveryState:
     frontier: deque[CrawlItem]
     known_urls: dict[str, str]
     known_documents: dict[str, str]
+    expansion_backlog: deque[CrawlItem] = field(default_factory=deque)
 
 
 @dataclass

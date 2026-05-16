@@ -164,6 +164,18 @@ def frontier_by_depth_from_state(config: dict) -> dict[str, int]:
     return {str(depth): counts[depth] for depth in sorted(counts)}
 
 
+def reexpansion_by_depth_from_state(config: dict) -> dict[str, int]:
+    """Conta le pagine di bordo riespandibili con la max_depth corrente."""
+    state = load_discovery_state(config)
+    max_depth = config["crawler"]["max_depth"]
+    counts = Counter(
+        item.depth
+        for item in state.expansion_backlog
+        if item.depth < max_depth
+    )
+    return {str(depth): counts[depth] for depth in sorted(counts)}
+
+
 def checkpoint_summary(config: dict) -> tuple[str | None, str | None]:
     """Legge lo stato finale della discovery necessario al verdetto di copertura."""
     path = project_path(config["paths"]["checkpoint_file"])
@@ -183,6 +195,7 @@ def build_depth_coverage(
     frontier_by_depth: dict[str, int],
     checkpoint_status: str | None,
     stop_reason: str | None,
+    reexpansion_by_depth: dict[str, int] | None = None,
 ) -> dict:
     """
     Calcola la chiusura cumulativa della BFS per ogni profondità HTML.
@@ -195,25 +208,32 @@ def build_depth_coverage(
         int(depth): int(count)
         for depth, count in frontier_by_depth.items()
     }
+    numeric_reexpansion = {
+        int(depth): int(count)
+        for depth, count in (reexpansion_by_depth or {}).items()
+    }
 
     depths: list[dict] = []
     pending_below = 0
     for depth in range(max_depth + 1):
         pending_at_depth = numeric_frontier.get(depth, 0)
+        pending_reexpansion_at_depth = numeric_reexpansion.get(depth, 0)
         sealed = pending_below == 0
         complete = sealed and pending_at_depth == 0
         depths.append(
             {
                 "depth": depth,
                 "pending_at_depth": pending_at_depth,
+                "pending_reexpansion_at_depth": pending_reexpansion_at_depth,
                 "pending_below_depth": pending_below,
                 "sealed": sealed,
                 "complete": complete,
             }
         )
-        pending_below += pending_at_depth
+        pending_below += pending_at_depth + pending_reexpansion_at_depth
 
     frontier_remaining = sum(numeric_frontier.values())
+    reexpansion_remaining = sum(numeric_reexpansion.values())
     all_depths_complete = all(depth["complete"] for depth in depths)
     blocking_reasons: list[str] = []
 
@@ -223,9 +243,15 @@ def build_depth_coverage(
     elif stop_reason != "queue_exhausted":
         verdict = "incomplete"
         blocking_reasons.append(f"stop_reason:{stop_reason or 'missing'}")
-    elif frontier_remaining > 0 or not all_depths_complete:
+    elif frontier_remaining > 0:
         verdict = "incomplete"
         blocking_reasons.append("frontier_not_drained")
+    elif reexpansion_remaining > 0:
+        verdict = "incomplete"
+        blocking_reasons.append("reexpansion_not_drained")
+    elif not all_depths_complete:
+        verdict = "incomplete"
+        blocking_reasons.append("depths_not_complete")
     else:
         verdict = "complete"
 
@@ -236,6 +262,8 @@ def build_depth_coverage(
         "stop_reason": stop_reason,
         "frontier_remaining": frontier_remaining,
         "frontier_by_depth": frontier_by_depth,
+        "reexpansion_remaining": reexpansion_remaining,
+        "reexpansion_by_depth": reexpansion_by_depth or {},
         "depths": depths,
         "blocking_reasons": blocking_reasons,
     }
@@ -246,6 +274,7 @@ def build_discovery_stats(config: dict) -> dict:
     path = project_path(config["paths"]["discovered_urls_file"])
     records = load_jsonl(path)
     frontier_by_depth = frontier_by_depth_from_state(config)
+    reexpansion_by_depth = reexpansion_by_depth_from_state(config)
     checkpoint_status, stop_reason = checkpoint_summary(config)
 
     return {
@@ -260,6 +289,7 @@ def build_discovery_stats(config: dict) -> dict:
             frontier_by_depth,
             checkpoint_status,
             stop_reason,
+            reexpansion_by_depth,
         ),
     }
 

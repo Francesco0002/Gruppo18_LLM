@@ -11,6 +11,7 @@ Questo script orchestra il primo step della pipeline:
 7. aggiorna data/discovery_state.json per continuare la frontier tra run
 8. espone metriche per depth utili a capire se la frontiera si sta esaurendo
    tra run successive con budget limitato
+9. conserva le pagine HTML di bordo da riespandere quando aumenta max_depth
 
 La logica di processing del singolo URL vive in discovery_processor.py.
 """
@@ -76,16 +77,58 @@ def count_recorded_html_by_depth(output_file: Path) -> dict[str, int]:
     return {str(depth): counts[depth] for depth in sorted(counts)}
 
 
+def eligible_reexpansion_items(
+    persistent_state: PersistentDiscoveryState,
+    max_depth: int,
+) -> list[CrawlItem]:
+    """Pagine di bordo già viste che possono aprire il livello successivo."""
+    return [
+        CrawlItem(item.url, item.depth, item.discovered_from, force_revisit=True)
+        for item in persistent_state.expansion_backlog
+        if item.depth < max_depth
+    ]
+
+
+def due_bootstrap_items(
+    urls: list[str],
+    source: str,
+    persistent_state: PersistentDiscoveryState,
+    config: dict | None,
+    reference_time: datetime | None,
+) -> list[CrawlItem]:
+    """Seed e sitemap da accodare solo se nuovi o dovuti al refresh."""
+    items: list[CrawlItem] = []
+    for url in urls:
+        last_seen = persistent_state.known_urls.get(url)
+        if last_seen and config is not None and not is_due_for_refresh(
+            last_seen,
+            config,
+            reference_time,
+        ):
+            continue
+        items.append(CrawlItem(url, 0, source))
+    return items
+
+
 def create_initial_state(
     seed_urls: list[str],
     sitemap_urls: list[str],
     persistent_state: PersistentDiscoveryState | None = None,
+    max_depth: int | None = None,
+    config: dict | None = None,
+    reference_time: datetime | None = None,
 ) -> CrawlState:
-    """Crea la BFS da frontier persistita, seed e sitemap."""
+    """Crea la BFS da lavoro persistito più bootstrap nuovi o da refresh."""
     persistent_state = persistent_state or PersistentDiscoveryState(deque(), {}, {})
     initial_items = list(persistent_state.frontier)
-    initial_items.extend(CrawlItem(url, 0, "seed") for url in seed_urls)
-    initial_items.extend(CrawlItem(url, 0, "sitemap") for url in sitemap_urls)
+    if max_depth is not None:
+        initial_items.extend(eligible_reexpansion_items(persistent_state, max_depth))
+    initial_items.extend(
+        due_bootstrap_items(seed_urls, "seed", persistent_state, config, reference_time)
+    )
+    initial_items.extend(
+        due_bootstrap_items(sitemap_urls, "sitemap", persistent_state, config, reference_time)
+    )
 
     deduped_items: list[CrawlItem] = []
     seen_urls: set[str] = set()
@@ -104,6 +147,7 @@ def create_initial_state(
         domain_counts=Counter(),
         known_urls=dict(persistent_state.known_urls),
         known_documents=dict(persistent_state.known_documents),
+        expansion_backlog={item.url: item for item in persistent_state.expansion_backlog},
     )
 
 
@@ -142,7 +186,7 @@ def visit_skip_reason(
     if item.url in state.visited:
         return "already_visited"
 
-    if item.url in state.known_urls and not is_due_for_refresh(
+    if not item.force_revisit and item.url in state.known_urls and not is_due_for_refresh(
         state.known_urls[item.url],
         config,
         reference_time,
@@ -245,10 +289,10 @@ def enqueue_links(
     links: list[str],
     state: CrawlState,
     config: dict,
-) -> None:
-    """Aggiunge alla coda i link trovati, se la profondità lo consente."""
+) -> bool:
+    """Aggiunge i link trovati e indica se il parent è stato espanso."""
     if parent.depth >= config["crawler"]["max_depth"]:
-        return
+        return False
 
     for link in links:
         if link in state.visited or link in state.queued:
@@ -257,6 +301,43 @@ def enqueue_links(
             continue
         state.queue.append(CrawlItem(link, parent.depth + 1, parent.url))
         state.queued.add(link)
+
+    return True
+
+
+def can_track_expansion(record: dict, expand_links: bool) -> bool:
+    """True quando la pagina HTML è stata letta e può generare figli."""
+    return (
+        expand_links
+        and record.get("type") == "html"
+        and record.get("status") in {"ok", "not_indexable"}
+    )
+
+
+def update_expansion_backlog(
+    item: CrawlItem,
+    record: dict,
+    expand_links: bool,
+    expanded: bool,
+    state: CrawlState,
+) -> None:
+    """Aggiorna le pagine di bordo da riespandere in run con depth maggiore."""
+    if not expand_links:
+        state.expansion_backlog.pop(item.url, None)
+        return
+
+    if not can_track_expansion(record, expand_links):
+        return
+
+    if expanded:
+        state.expansion_backlog.pop(item.url, None)
+        return
+
+    state.expansion_backlog[item.url] = CrawlItem(
+        item.url,
+        item.depth,
+        item.discovered_from,
+    )
 
 
 def mark_same_batch_redirect_duplicates(processed_items: list[ProcessedDiscoveryItem]) -> None:
@@ -304,6 +385,10 @@ async def run_discovery(config: dict) -> dict:
     persistent_state = load_discovery_state(config)
     frontier_loaded = len(persistent_state.frontier)
     frontier_before_by_depth = count_items_by_depth(persistent_state.frontier)
+    expansion_backlog_before_by_depth = count_items_by_depth(persistent_state.expansion_backlog)
+    reexpansion_loaded = len(
+        eligible_reexpansion_items(persistent_state, config["crawler"]["max_depth"])
+    )
 
     async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
         state = load_checkpoint(config, persistent_state)
@@ -312,7 +397,14 @@ async def run_discovery(config: dict) -> dict:
             output_file.unlink(missing_ok=True)
             recorded_pdf_urls: set[str] = set()
             sitemap_urls = await fetch_sitemap_urls(client, config, limiter)
-            state = create_initial_state(seed_urls, sitemap_urls, persistent_state)
+            state = create_initial_state(
+                seed_urls,
+                sitemap_urls,
+                persistent_state,
+                config["crawler"]["max_depth"],
+                config,
+                reference_time,
+            )
         else:
             print("Checkpoint trovato: riprendo il crawl precedente.")
             recorded_pdf_urls = load_recorded_pdf_urls(output_file)
@@ -366,6 +458,7 @@ async def run_discovery(config: dict) -> dict:
                     if record["type"] == "pdf":
                         recorded_pdf_urls.add(record["url"])
 
+                    expanded = False
                     if expand_links:
                         for pdf_record in processed.linked_pdf_records:
                             if pdf_record["url"] in recorded_pdf_urls:
@@ -373,7 +466,15 @@ async def run_discovery(config: dict) -> dict:
                             write_record(output_file, pdf_record, status_counts, type_counts)
                             recorded_pdf_urls.add(pdf_record["url"])
 
-                        enqueue_links(item, processed.traversal_links, state, config)
+                        expanded = enqueue_links(item, processed.traversal_links, state, config)
+
+                    update_expansion_backlog(
+                        item,
+                        record,
+                        expand_links,
+                        expanded,
+                        state,
+                    )
 
                 save_checkpoint(
                     state,
@@ -419,6 +520,11 @@ async def run_discovery(config: dict) -> dict:
         "frontier_remaining": len(state.queue),
         "frontier_before_by_depth": frontier_before_by_depth,
         "frontier_after_by_depth": count_items_by_depth(state.queue),
+        "reexpansion_loaded": reexpansion_loaded,
+        "expansion_backlog_before_by_depth": expansion_backlog_before_by_depth,
+        "expansion_backlog_after_by_depth": count_items_by_depth(
+            list(state.expansion_backlog.values())
+        ),
         "processed_html_by_depth": count_recorded_html_by_depth(output_file),
         "known_urls": len(state.known_urls),
         "known_documents": len(state.known_documents),

@@ -6,7 +6,8 @@ Responsabilità:
 - risolvere path relativi alla root progetto;
 - leggere seed URL;
 - creare record per discovered_urls.jsonl;
-- salvare HTML grezzo e checkpoint BFS.
+- salvare HTML grezzo, checkpoint BFS e backlog delle pagine di bordo da
+  riespandere quando aumenta max_depth.
 
 Questo modulo non effettua richieste HTTP e non processa HTML.
 """
@@ -260,6 +261,13 @@ def save_checkpoint(
         "domain_counts": dict(state.domain_counts),
         "new_known_urls": new_known_urls,
         "new_known_documents": new_known_documents,
+        "expansion_backlog": [
+            asdict(item)
+            for item in sorted(
+                state.expansion_backlog.values(),
+                key=lambda item: (item.depth, item.url),
+            )
+        ],
     }
     if status == "completed" and stop_reason is not None:
         checkpoint["stop_reason"] = stop_reason
@@ -311,6 +319,16 @@ def load_checkpoint(
             **dict(data.get("known_documents", {})),
         }
 
+    raw_backlog = data.get("expansion_backlog")
+    if raw_backlog is None:
+        backlog_items = list(persistent_state.expansion_backlog)
+    else:
+        try:
+            backlog_items = [CrawlItem(**item) for item in raw_backlog]
+        except (TypeError, KeyError) as exc:
+            print(f"Checkpoint expansion backlog invalid: {exc}")
+            backlog_items = list(persistent_state.expansion_backlog)
+
     return CrawlState(
         queue=queue,
         queued=queued,
@@ -319,6 +337,7 @@ def load_checkpoint(
         domain_counts=Counter(data.get("domain_counts", {})),
         known_urls=known_urls,
         known_documents=known_documents,
+        expansion_backlog={item.url: item for item in backlog_items},
     )
 
 
@@ -328,6 +347,7 @@ def empty_persistent_state() -> PersistentDiscoveryState:
         frontier=deque(),
         known_urls={},
         known_documents={},
+        expansion_backlog=deque(),
     )
 
 
@@ -340,6 +360,9 @@ def load_discovery_state(config: dict) -> PersistentDiscoveryState:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         frontier = deque(CrawlItem(**item) for item in data.get("frontier", []))
+        expansion_backlog = deque(
+            CrawlItem(**item) for item in data.get("expansion_backlog", [])
+        )
     except (json.JSONDecodeError, OSError, TypeError, KeyError) as exc:
         print(f"Discovery state corrupted or unreadable: {exc}")
         return empty_persistent_state()
@@ -348,14 +371,22 @@ def load_discovery_state(config: dict) -> PersistentDiscoveryState:
         frontier=frontier,
         known_urls=dict(data.get("known_urls", {})),
         known_documents=dict(data.get("known_documents", {})),
+        expansion_backlog=expansion_backlog,
     )
 
 
 def save_discovery_state(state: CrawlState, config: dict) -> None:
-    """Salva frontier e memoria cumulativa per il run successivo."""
+    """Salva frontier, memoria cumulativa e pagine di bordo da riespandere."""
     discovery_state = {
         "frontier": [asdict(item) for item in state.queue],
         "known_urls": state.known_urls,
         "known_documents": state.known_documents,
+        "expansion_backlog": [
+            asdict(item)
+            for item in sorted(
+                state.expansion_backlog.values(),
+                key=lambda item: (item.depth, item.url),
+            )
+        ],
     }
     write_json(project_path(config["paths"]["discovery_state_file"]), discovery_state)

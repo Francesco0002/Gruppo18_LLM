@@ -63,6 +63,43 @@ restano budget del singolo run, non contatori globali.
 serve come input immediato agli step di scraping HTML ed estrazione PDF, mentre
 la memoria cumulativa vive in `discovery_state.json`.
 
+### Perché serve `expansion_backlog`
+
+Un URL può essere:
+
+- **visitato**: la pagina è stata scaricata;
+- **espanso**: oltre a scaricarla, il crawler ha anche seguito i suoi link per
+  popolare la depth successiva.
+
+Queste due cose non coincidono sempre. Esempio:
+
+1. una run usa `max_depth: 1`;
+2. il crawler visita una pagina a depth 1;
+3. quella pagina viene scaricata, ma i suoi link non vengono seguiti, perché
+   produrrebbero URL a depth 2, fuori dal limite della run;
+4. se in seguito si passa a `max_depth: 2`, quella stessa pagina va riletta per
+   poter scoprire i figli di depth 2.
+
+Prima della modifica, le pagine di bordo venivano considerate solo come
+"già visitate". Se si aumentava `max_depth`, il crawler non le riapriva perché
+erano ancora dentro `refresh_after_days`; di conseguenza una run a depth 2
+poteva terminare senza trovare nessun nuovo URL, anche se la depth 2 non era
+stata davvero esplorata.
+
+Per evitare questo problema, oltre alla frontier non ancora visitata,
+`discovery_state.json` conserva `expansion_backlog`: l'elenco delle pagine HTML
+già scaricate ma non ancora espanse abbastanza rispetto a una futura depth più
+alta. Quando una run successiva aumenta `max_depth`, quelle pagine vengono
+riaccodate con una **riespansione mirata**: il crawler le rilegge per aprire il
+nuovo livello, senza dover fare `make clean` e senza attendere
+`refresh_after_days`.
+
+In breve:
+
+- `frontier` = URL ancora da visitare;
+- `expansion_backlog` = pagine già visitate, ma da riaprire se vuoi esplorare
+  una depth più profonda.
+
 Il checkpoint usa `status="in_progress"` durante il run e
 `status="completed"` a chiusura. Solo il checkpoint finale riporta anche
 `stop_reason`, così si distingue tra arresto per `max_total_urls`, coda
@@ -74,20 +111,48 @@ anche `skipped_by_reason`: ad esempio `recently_known` segnala URL già noti e
 ancora dentro la finestra `refresh_after_days`, quindi esclusi senza fetch nella
 run corrente.
 
+Anche nella costruzione iniziale della coda, seed e sitemap già noti e ancora
+recenti non vengono riaccodati inutilmente se non sono dovuti al refresh. In
+questo modo una run che riprende da frontier o da `expansion_backlog` non si
+porta dietro seed superflui a depth 0 che renderebbero meno leggibile il report
+di copertura.
+
 Le statistiche in `data/processed/stats.json` includono anche
 `discovery.coverage`, che misura la copertura cumulativa della BFS per singola
-depth fino a `max_depth`. Per ogni livello espone gli URL ancora pendenti a
-quella profondità (`pending_at_depth`), quelli ancora pendenti a profondità
-inferiori (`pending_below_depth`), se il livello è già sigillato (`sealed`) e
-se è completo (`complete`). Una depth è completa solo quando non restano URL
-pendenti né a quel livello né sotto di esso; il verdetto globale è `complete`
-solo se tutte le depth configurate sono complete e la run termina con
-`queue_exhausted`.
+depth fino a `max_depth`. Per ogni livello espone:
 
-Lo storico di ciascuna run conserva anche
-`frontier_before_by_depth`, `frontier_after_by_depth` e
-`processed_html_by_depth`, così run successive con lo stesso `max_depth`
-mostrano se una frontiera si sta svuotando o se continuano a emergere nuovi URL.
+- `pending_at_depth`: URL di quella depth già scoperti ma non ancora visitati;
+- `pending_reexpansion_at_depth`: pagine già visitate a quella depth che devono
+  ancora essere riespanse per aprire il livello successivo;
+- `pending_below_depth`: lavoro ancora aperto nelle depth inferiori;
+- `sealed`: `true` solo quando le depth inferiori non possono più produrre nuovi
+  URL per quel livello;
+- `complete`: `true` solo quando quel livello è davvero esaurito.
+
+Una depth è completa solo quando:
+
+1. non ha URL propri ancora da visitare;
+2. non dipende più da depth inferiori ancora aperte;
+3. non restano pagine da riespandere che potrebbero generare nuovi figli.
+
+Il verdetto globale è `complete` solo se tutte le depth configurate soddisfano
+queste condizioni e la run termina con `queue_exhausted`.
+
+Lo storico di ciascuna run conserva anche `frontier_before_by_depth`,
+`frontier_after_by_depth`, `expansion_backlog_before_by_depth`,
+`expansion_backlog_after_by_depth` e `processed_html_by_depth`, così run
+successive mostrano sia se una frontiera si sta svuotando sia quando una nuova
+depth viene aperta tramite riespansione.
+
+Per leggere l'andamento di una run:
+
+- se `frontier_after_by_depth["2"]` resta alto, ci sono ancora URL di depth 2 da
+  visitare;
+- se `expansion_backlog_after_by_depth["1"]` è maggiore di zero, le pagine di
+  depth 1 sono state visitate ma aspettano una run con `max_depth >= 2` per
+  generare figli;
+- se entrambi arrivano a zero e `coverage.depths[2].complete` è `true`, allora
+  la depth 2 è stata davvero coperta rispetto alle regole del crawler.
 I PDF restano inclusi nelle statistiche generali, ma non riaprono la BFS HTML:
 quando sono linkati da una pagina al limite possono comparire a
 `depth = max_depth + 1`.
