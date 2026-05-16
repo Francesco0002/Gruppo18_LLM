@@ -9,6 +9,8 @@ Questo script orchestra il primo step della pipeline:
 5. scrive gli URL scoperti in data/discovered_urls.jsonl
 6. aggiorna data/checkpoint.json per poter riprendere un crawl interrotto
 7. aggiorna data/discovery_state.json per continuare la frontier tra run
+8. espone metriche per depth utili a capire se la frontiera si sta esaurendo
+   tra run successive con budget limitato
 
 La logica di processing del singolo URL vive in discovery_processor.py.
 """
@@ -42,6 +44,36 @@ from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState, Pr
 from discovery_processor import filter_context, process_item
 from pipeline_io import now_iso
 from url_filters import can_traverse_url, is_pdf_url
+
+
+def count_items_by_depth(items: list[CrawlItem] | deque[CrawlItem]) -> dict[str, int]:
+    """Conta la frontiera BFS per depth, così il report può seguirne lo svuotamento."""
+    counts = Counter(item.depth for item in items)
+    return {str(depth): counts[depth] for depth in sorted(counts)}
+
+
+def count_recorded_html_by_depth(output_file: Path) -> dict[str, int]:
+    """Conta gli HTML prodotti nella run corrente, separandoli dagli URL PDF terminali."""
+    if not output_file.exists():
+        return {}
+
+    counts: Counter[int] = Counter()
+    with output_file.open("r", encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"Skipping malformed line in discovered_urls.jsonl: {exc}")
+                continue
+            if record.get("type") != "html":
+                continue
+            depth = record.get("depth")
+            if isinstance(depth, int):
+                counts[depth] += 1
+
+    return {str(depth): counts[depth] for depth in sorted(counts)}
 
 
 def create_initial_state(
@@ -97,26 +129,39 @@ def can_visit(
     reference_time: datetime | None = None,
 ) -> bool:
     """True se l'URL può essere inserito nel prossimo batch."""
+    return visit_skip_reason(item, state, config, reference_time) is None
+
+
+def visit_skip_reason(
+    item: CrawlItem,
+    state: CrawlState,
+    config: dict,
+    reference_time: datetime | None = None,
+) -> str | None:
+    """Motivo per cui un item non può entrare nel batch corrente, se esiste."""
     if item.url in state.visited:
-        return False
+        return "already_visited"
 
     if item.url in state.known_urls and not is_due_for_refresh(
         state.known_urls[item.url],
         config,
         reference_time,
     ):
-        return False
+        return "recently_known"
 
     ok, _ = can_traverse_url(item.url, config, filter_context(item.discovered_from))
     if not ok:
-        return False
+        return "out_of_scope"
 
     domain = urlparse(item.url).netloc
     domain_limit = config["crawler"]["per_domain_limits"].get(domain, 0)
     if state.domain_counts[domain] >= domain_limit:
-        return False
+        return "domain_limit"
 
-    return len(state.visited) < config["crawler"]["max_total_urls"]
+    if len(state.visited) >= config["crawler"]["max_total_urls"]:
+        return "max_total_urls"
+
+    return None
 
 
 def mark_visited(state: CrawlState, url: str, visited_at: str | None = None) -> bool:
@@ -137,6 +182,7 @@ def take_batch(
     config: dict,
     reference_time: datetime | None = None,
     visited_at: str | None = None,
+    skip_counts: Counter[str] | None = None,
 ) -> list[CrawlItem]:
     """Prende dalla coda un batch di URL validi da scaricare."""
     batch: list[CrawlItem] = []
@@ -149,7 +195,10 @@ def take_batch(
         # queued rappresenta solo gli URL ancora presenti nella coda BFS.
         state.queued.discard(item.url)
 
-        if not can_visit(item, state, config, reference_time):
+        skip_reason = visit_skip_reason(item, state, config, reference_time)
+        if skip_reason is not None:
+            if skip_counts is not None:
+                skip_counts[skip_reason] += 1
             continue
 
         mark_visited(state, item.url, visited_at)
@@ -162,10 +211,10 @@ def discovery_stop_reason(state: CrawlState, config: dict, exhausted_without_bat
     """Classifica il motivo di arresto della discovery."""
     if len(state.visited) >= config["crawler"]["max_total_urls"]:
         return "max_total_urls"
-    if not state.queue:
-        return "queue_exhausted"
     if exhausted_without_batch:
         return "no_eligible_urls"
+    if not state.queue:
+        return "queue_exhausted"
     return "unknown"
 
 
@@ -249,10 +298,12 @@ async def run_discovery(config: dict) -> dict:
 
     status_counts: Counter[str] = Counter()
     type_counts: Counter[str] = Counter()
+    skip_counts: Counter[str] = Counter()
     run_started_at = now_iso()
     reference_time = datetime.fromisoformat(run_started_at)
     persistent_state = load_discovery_state(config)
     frontier_loaded = len(persistent_state.frontier)
+    frontier_before_by_depth = count_items_by_depth(persistent_state.frontier)
 
     async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
         state = load_checkpoint(config, persistent_state)
@@ -276,7 +327,7 @@ async def run_discovery(config: dict) -> dict:
             dynamic_ncols=True,
         ) as progress:
             while state.queue and len(state.visited) < max_total_urls:
-                batch = take_batch(state, config, reference_time, run_started_at)
+                batch = take_batch(state, config, reference_time, run_started_at, skip_counts)
                 if not batch:
                     exhausted_without_batch = True
                     break
@@ -349,6 +400,12 @@ async def run_discovery(config: dict) -> dict:
     )
     save_discovery_state(state, config)
 
+    if stop_reason == "no_eligible_urls":
+        print(
+            "Discovery senza nuovi URL eleggibili: "
+            f"{dict(skip_counts)}"
+        )
+
     return {
         "seed_urls": len(seed_urls),
         "visited_urls": len(state.visited),
@@ -357,8 +414,12 @@ async def run_discovery(config: dict) -> dict:
         "by_domain": dict(state.domain_counts),
         "by_status": dict(status_counts),
         "by_type": dict(type_counts),
+        "skipped_by_reason": dict(skip_counts),
         "frontier_loaded": frontier_loaded,
         "frontier_remaining": len(state.queue),
+        "frontier_before_by_depth": frontier_before_by_depth,
+        "frontier_after_by_depth": count_items_by_depth(state.queue),
+        "processed_html_by_depth": count_recorded_html_by_depth(output_file),
         "known_urls": len(state.known_urls),
         "known_documents": len(state.known_documents),
         "stop_reason": stop_reason,

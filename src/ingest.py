@@ -6,7 +6,8 @@ Questo script coordina:
 2. conversione HTML in Markdown
 3. estrazione PDF in Markdown
 4. marcatura dei documenti duplicati nel manifest processed
-5. generazione delle statistiche in data/processed/stats.json e nello storico run
+5. generazione delle statistiche in data/processed/stats.json e nello storico run,
+   inclusa la copertura cumulativa della BFS per singola depth
 
 La fase di ingest non crea ancora chunk o embedding: prepara un corpus
 Markdown pulito, misurabile e pronto per la fase di indexing.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +26,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from discover import run_discovery
-from discovery_io import load_config, project_path, validate_config
+from discovery_io import load_config, load_discovery_state, project_path, validate_config
 from extract_pdf import run_extract_pdf
 from pipeline_io import (
     latest_record_indexes,
@@ -145,10 +147,106 @@ def markdown_char_stats(records: list[ProcessedRecord]) -> dict:
     )
 
 
+def html_records_by_depth(records: list[dict]) -> dict[str, int]:
+    """Conta gli HTML della run corrente: sono i nodi che possono espandere la BFS."""
+    counts = Counter(
+        str(record["depth"])
+        for record in records
+        if record.get("type") == "html" and isinstance(record.get("depth"), int)
+    )
+    return {depth: counts[depth] for depth in sorted(counts, key=int)}
+
+
+def frontier_by_depth_from_state(config: dict) -> dict[str, int]:
+    """Legge la frontiera residua tra run, aggregata per profondità BFS."""
+    state = load_discovery_state(config)
+    counts = Counter(item.depth for item in state.frontier)
+    return {str(depth): counts[depth] for depth in sorted(counts)}
+
+
+def checkpoint_summary(config: dict) -> tuple[str | None, str | None]:
+    """Legge lo stato finale della discovery necessario al verdetto di copertura."""
+    path = project_path(config["paths"]["checkpoint_file"])
+    if not path.exists():
+        return None, None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None, None
+
+    return data.get("status"), data.get("stop_reason")
+
+
+def build_depth_coverage(
+    max_depth: int,
+    frontier_by_depth: dict[str, int],
+    checkpoint_status: str | None,
+    stop_reason: str | None,
+) -> dict:
+    """
+    Calcola la chiusura cumulativa della BFS per ogni profondità HTML.
+
+    Una depth può dirsi completa solo se non ha URL pendenti propri e se tutte
+    le depth inferiori sono già sigillate, perché solo allora non possono più
+    emergere nuovi figli a quel livello nelle run successive.
+    """
+    numeric_frontier = {
+        int(depth): int(count)
+        for depth, count in frontier_by_depth.items()
+    }
+
+    depths: list[dict] = []
+    pending_below = 0
+    for depth in range(max_depth + 1):
+        pending_at_depth = numeric_frontier.get(depth, 0)
+        sealed = pending_below == 0
+        complete = sealed and pending_at_depth == 0
+        depths.append(
+            {
+                "depth": depth,
+                "pending_at_depth": pending_at_depth,
+                "pending_below_depth": pending_below,
+                "sealed": sealed,
+                "complete": complete,
+            }
+        )
+        pending_below += pending_at_depth
+
+    frontier_remaining = sum(numeric_frontier.values())
+    all_depths_complete = all(depth["complete"] for depth in depths)
+    blocking_reasons: list[str] = []
+
+    if checkpoint_status != "completed":
+        verdict = "unknown"
+        blocking_reasons.append("checkpoint_not_completed")
+    elif stop_reason != "queue_exhausted":
+        verdict = "incomplete"
+        blocking_reasons.append(f"stop_reason:{stop_reason or 'missing'}")
+    elif frontier_remaining > 0 or not all_depths_complete:
+        verdict = "incomplete"
+        blocking_reasons.append("frontier_not_drained")
+    else:
+        verdict = "complete"
+
+    return {
+        "verdict": verdict,
+        "configured_max_depth": max_depth,
+        "checkpoint_status": checkpoint_status,
+        "stop_reason": stop_reason,
+        "frontier_remaining": frontier_remaining,
+        "frontier_by_depth": frontier_by_depth,
+        "depths": depths,
+        "blocking_reasons": blocking_reasons,
+    }
+
+
 def build_discovery_stats(config: dict) -> dict:
-    """Aggrega statistiche leggere da discovered_urls.jsonl."""
+    """Aggrega statistiche discovery e il verdetto di copertura per depth."""
     path = project_path(config["paths"]["discovered_urls_file"])
     records = load_jsonl(path)
+    frontier_by_depth = frontier_by_depth_from_state(config)
+    checkpoint_status, stop_reason = checkpoint_summary(config)
 
     return {
         "records": len(records),
@@ -156,6 +254,13 @@ def build_discovery_stats(config: dict) -> dict:
         "by_type": count_by(records, "type"),
         "by_domain": dict(Counter(domain_from_record(record) for record in records)),
         "by_depth": dict(Counter(str(record.get("depth", "missing")) for record in records)),
+        "processed_html_by_depth": html_records_by_depth(records),
+        "coverage": build_depth_coverage(
+            config["crawler"]["max_depth"],
+            frontier_by_depth,
+            checkpoint_status,
+            stop_reason,
+        ),
     }
 
 

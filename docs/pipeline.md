@@ -69,6 +69,29 @@ Il checkpoint usa `status="in_progress"` durante il run e
 esaurita (`queue_exhausted`) e coda senza URL più eleggibili
 (`no_eligible_urls`).
 
+Quando una run non ha URL eleggibili, le statistiche della discovery riportano
+anche `skipped_by_reason`: ad esempio `recently_known` segnala URL già noti e
+ancora dentro la finestra `refresh_after_days`, quindi esclusi senza fetch nella
+run corrente.
+
+Le statistiche in `data/processed/stats.json` includono anche
+`discovery.coverage`, che misura la copertura cumulativa della BFS per singola
+depth fino a `max_depth`. Per ogni livello espone gli URL ancora pendenti a
+quella profondità (`pending_at_depth`), quelli ancora pendenti a profondità
+inferiori (`pending_below_depth`), se il livello è già sigillato (`sealed`) e
+se è completo (`complete`). Una depth è completa solo quando non restano URL
+pendenti né a quel livello né sotto di esso; il verdetto globale è `complete`
+solo se tutte le depth configurate sono complete e la run termina con
+`queue_exhausted`.
+
+Lo storico di ciascuna run conserva anche
+`frontier_before_by_depth`, `frontier_after_by_depth` e
+`processed_html_by_depth`, così run successive con lo stesso `max_depth`
+mostrano se una frontiera si sta svuotando o se continuano a emergere nuovi URL.
+I PDF restano inclusi nelle statistiche generali, ma non riaprono la BFS HTML:
+quando sono linkati da una pagina al limite possono comparire a
+`depth = max_depth + 1`.
+
 I PDF linkati dagli HTML vengono registrati subito in
 `discovered_urls.jsonl`. Se `robots.txt` consente il download, ricevono
 `status="pending_download"`; altrimenti ricevono `status="robots_denied"`.
