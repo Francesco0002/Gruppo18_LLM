@@ -232,22 +232,44 @@ def write_record(
     append_jsonl(output_file, record)
 
 
-def save_checkpoint(state: CrawlState, config: dict, completed: bool) -> None:
+def save_checkpoint(
+    state: CrawlState,
+    config: dict,
+    status: str,
+    stop_reason: str | None = None,
+    persistent_state: PersistentDiscoveryState | None = None,
+) -> None:
     """Salva lo stato del crawl per poter riprendere in caso di interruzione."""
+    persistent_state = persistent_state or empty_persistent_state()
+    new_known_urls = {
+        url: timestamp
+        for url, timestamp in state.known_urls.items()
+        if persistent_state.known_urls.get(url) != timestamp
+    }
+    new_known_documents = {
+        url: timestamp
+        for url, timestamp in state.known_documents.items()
+        if persistent_state.known_documents.get(url) != timestamp
+    }
     checkpoint = {
-        "completed": completed,
+        "status": status,
         "queue": [asdict(item) for item in state.queue],
         "queued": sorted(state.queued),
         "visited": sorted(state.visited),
         "seen_documents": sorted(state.seen_documents),
         "domain_counts": dict(state.domain_counts),
-        "known_urls": state.known_urls,
-        "known_documents": state.known_documents,
+        "new_known_urls": new_known_urls,
+        "new_known_documents": new_known_documents,
     }
+    if status == "completed" and stop_reason is not None:
+        checkpoint["stop_reason"] = stop_reason
     write_json(project_path(config["paths"]["checkpoint_file"]), checkpoint)
 
 
-def load_checkpoint(config: dict) -> CrawlState | None:
+def load_checkpoint(
+    config: dict,
+    persistent_state: PersistentDiscoveryState | None = None,
+) -> CrawlState | None:
     """Carica un checkpoint incompleto, se esiste."""
     path = project_path(config["paths"]["checkpoint_file"])
     if not path.exists():
@@ -259,7 +281,11 @@ def load_checkpoint(config: dict) -> CrawlState | None:
         print(f"Checkpoint file corrupted or unreadable: {exc}")
         return None
 
-    if data.get("completed", False):
+    status = data.get("status")
+    if status is None:
+        status = "completed" if data.get("completed", False) else "in_progress"
+
+    if status == "completed":
         return None
 
     try:
@@ -270,14 +296,29 @@ def load_checkpoint(config: dict) -> CrawlState | None:
 
     queued = {item.url for item in queue}
 
+    persistent_state = persistent_state or empty_persistent_state()
+    if "new_known_urls" in data or "new_known_documents" in data:
+        known_urls = {**persistent_state.known_urls, **dict(data.get("new_known_urls", {}))}
+        known_documents = {
+            **persistent_state.known_documents,
+            **dict(data.get("new_known_documents", {})),
+        }
+    else:
+        # Compatibilità con i checkpoint precedenti che salvavano la copia completa.
+        known_urls = {**persistent_state.known_urls, **dict(data.get("known_urls", {}))}
+        known_documents = {
+            **persistent_state.known_documents,
+            **dict(data.get("known_documents", {})),
+        }
+
     return CrawlState(
         queue=queue,
         queued=queued,
         visited=set(data.get("visited", [])),
         seen_documents=set(data.get("seen_documents", [])),
         domain_counts=Counter(data.get("domain_counts", {})),
-        known_urls=dict(data.get("known_urls", {})),
-        known_documents=dict(data.get("known_documents", {})),
+        known_urls=known_urls,
+        known_documents=known_documents,
     )
 
 

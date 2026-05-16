@@ -158,6 +158,17 @@ def take_batch(
     return batch
 
 
+def discovery_stop_reason(state: CrawlState, config: dict, exhausted_without_batch: bool = False) -> str:
+    """Classifica il motivo di arresto della discovery."""
+    if len(state.visited) >= config["crawler"]["max_total_urls"]:
+        return "max_total_urls"
+    if not state.queue:
+        return "queue_exhausted"
+    if exhausted_without_batch:
+        return "no_eligible_urls"
+    return "unknown"
+
+
 def load_recorded_pdf_urls(output_file: Path) -> set[str]:
     """URL PDF già scritti in discovered_urls.jsonl, utile nei resume."""
     if not output_file.exists():
@@ -244,7 +255,7 @@ async def run_discovery(config: dict) -> dict:
     frontier_loaded = len(persistent_state.frontier)
 
     async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
-        state = load_checkpoint(config)
+        state = load_checkpoint(config, persistent_state)
 
         if state is None:
             output_file.unlink(missing_ok=True)
@@ -253,14 +264,10 @@ async def run_discovery(config: dict) -> dict:
             state = create_initial_state(seed_urls, sitemap_urls, persistent_state)
         else:
             print("Checkpoint trovato: riprendo il crawl precedente.")
-            state.known_urls = {**persistent_state.known_urls, **state.known_urls}
-            state.known_documents = {
-                **persistent_state.known_documents,
-                **state.known_documents,
-            }
             recorded_pdf_urls = load_recorded_pdf_urls(output_file)
 
         max_total_urls = config["crawler"]["max_total_urls"]
+        exhausted_without_batch = False
         with tqdm(
             total=max_total_urls,
             initial=min(len(state.visited), max_total_urls),
@@ -271,6 +278,7 @@ async def run_discovery(config: dict) -> dict:
             while state.queue and len(state.visited) < max_total_urls:
                 batch = take_batch(state, config, reference_time, run_started_at)
                 if not batch:
+                    exhausted_without_batch = True
                     break
 
                 tasks = [
@@ -316,7 +324,12 @@ async def run_discovery(config: dict) -> dict:
 
                         enqueue_links(item, processed.traversal_links, state, config)
 
-                save_checkpoint(state, config, completed=False)
+                save_checkpoint(
+                    state,
+                    config,
+                    status="in_progress",
+                    persistent_state=persistent_state,
+                )
                 current_progress = min(len(state.visited), max_total_urls)
                 if current_progress > progress.n:
                     progress.update(current_progress - progress.n)
@@ -326,7 +339,14 @@ async def run_discovery(config: dict) -> dict:
                     refresh=False,
                 )
 
-    save_checkpoint(state, config, completed=True)
+    stop_reason = discovery_stop_reason(state, config, exhausted_without_batch)
+    save_checkpoint(
+        state,
+        config,
+        status="completed",
+        stop_reason=stop_reason,
+        persistent_state=persistent_state,
+    )
     save_discovery_state(state, config)
 
     return {
@@ -341,6 +361,7 @@ async def run_discovery(config: dict) -> dict:
         "frontier_remaining": len(state.queue),
         "known_urls": len(state.known_urls),
         "known_documents": len(state.known_documents),
+        "stop_reason": stop_reason,
         "output_file": config["paths"]["discovered_urls_file"],
         "raw_html_dir": config["paths"]["raw_html_dir"],
         "checkpoint_file": config["paths"]["checkpoint_file"],

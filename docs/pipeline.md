@@ -53,13 +53,21 @@ Responsabilità:
   senza consumare sempre il budget sui medesimi URL recenti.
 
 `checkpoint.json` è uno stato intra-run: se il processo si interrompe, permette
-di riprendere la stessa esecuzione. `discovery_state.json` è invece uno stato
-inter-run: conserva la frontier residua e la memoria cumulativa necessaria a
-proseguire la copertura in run successive. I limiti `max_total_urls` e
-`per_domain_limits` restano budget del singolo run, non contatori globali.
+di riprendere la stessa esecuzione. Salva queue, contatori del run e solo il
+delta di memoria rispetto allo stato persistente iniziale (`new_known_urls` e
+`new_known_documents`). `discovery_state.json` è invece uno stato inter-run:
+conserva la frontier residua e la memoria cumulativa necessaria a proseguire la
+copertura in run successive. I limiti `max_total_urls` e `per_domain_limits`
+restano budget del singolo run, non contatori globali.
 `discovered_urls.jsonl` resta lo snapshot degli URL prodotti dalla run corrente:
 serve come input immediato agli step di scraping HTML ed estrazione PDF, mentre
 la memoria cumulativa vive in `discovery_state.json`.
+
+Il checkpoint usa `status="in_progress"` durante il run e
+`status="completed"` a chiusura. Solo il checkpoint finale riporta anche
+`stop_reason`, così si distingue tra arresto per `max_total_urls`, coda
+esaurita (`queue_exhausted`) e coda senza URL più eleggibili
+(`no_eligible_urls`).
 
 I PDF linkati dagli HTML vengono registrati subito in
 `discovered_urls.jsonl`. Se `robots.txt` consente il download, ricevono
