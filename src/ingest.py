@@ -264,6 +264,16 @@ async def run_pipeline_steps(config: dict) -> dict[str, dict]:
 
     print("\n[3/5] Estrazione PDF")
     step_stats["extract_pdf"] = run_extract_pdf()
+    pdf_stats = step_stats["extract_pdf"]
+    print(
+        "PDF: "
+        f"scoperti_in_attesa={pdf_stats['pdf_pending_discovered']}, "
+        f"saltati_recenti={pdf_stats['skipped_recent']}, "
+        f"da_processare={pdf_stats['pdf_candidates']}, "
+        f"estratti_ok={pdf_stats['extracted_ok']}, "
+        f"falliti={pdf_stats['failed']}, "
+        f"troppo_grandi={pdf_stats['too_large']}"
+    )
 
     return step_stats
 

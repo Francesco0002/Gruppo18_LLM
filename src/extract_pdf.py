@@ -56,15 +56,19 @@ def markdown_path(url_hash: str, config: dict) -> Path:
     return base / url_hash[:2] / f"{url_hash}.md"
 
 
-def pdf_records(config: dict, recent_urls: set[str]) -> list[DiscoveryRecord]:
-    """Record PDF scoperti e non processati di recente."""
+def pending_pdf_records(config: dict) -> list[DiscoveryRecord]:
+    """Record PDF scoperti in attesa di download."""
     discovered_path = project_path(config["paths"]["discovered_urls_file"])
     return [
         record
         for record in load_jsonl(discovered_path)
         if record.get("type") == "pdf" and record.get("status") == "pending_download"
-        and record.get("url") not in recent_urls
     ]
+
+
+def pdf_records(records: list[DiscoveryRecord], recent_urls: set[str]) -> list[DiscoveryRecord]:
+    """Record PDF scoperti e non processati di recente."""
+    return [record for record in records if record.get("url") not in recent_urls]
 
 
 def download_pdf(record: DiscoveryRecord, config: dict, client: httpx.Client) -> dict:
@@ -223,10 +227,9 @@ def run_extract_pdf() -> dict:
     config = load_config()
     validate_config(config)
     manifest_path = project_path(config["paths"].get("processed_manifest_file", "data/processed/manifest.jsonl"))
-    records = pdf_records(
-        config,
-        recent_successful_urls(manifest_path, "pdf", SKIP_RECENT_DAYS),
-    )
+    pending_records = pending_pdf_records(config)
+    recent_urls = recent_successful_urls(manifest_path, "pdf", SKIP_RECENT_DAYS)
+    records = pdf_records(pending_records, recent_urls)
 
     headers = {"User-Agent": config["crawler"]["user_agent"]}
     timeout = httpx.Timeout(config["crawler"]["timeout"])
@@ -275,8 +278,13 @@ def run_extract_pdf() -> dict:
     append_jsonl_batch(manifest_path, manifest_records)
 
     return {
+        "pdf_pending_discovered": len(pending_records),
+        "skipped_recent": len(pending_records) - len(records),
         "pdf_candidates": len(records),
         "downloaded": len(downloads),
+        "extracted_ok": sum(record["status"] == "ok" for record in manifest_records),
+        "failed": sum(record["status"] == "failed" for record in manifest_records),
+        "too_large": sum(record["status"] == "too_large" for record in manifest_records),
         "manifest_records": len(manifest_records),
         "manifest": relative_path(manifest_path),
     }

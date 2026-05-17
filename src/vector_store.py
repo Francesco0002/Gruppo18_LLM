@@ -282,6 +282,14 @@ def query_vector_store(query: str, k: int = 5) -> None:
         print()
         print(preview_text(doc.page_content))
         print("-" * 80)
+        
+def dense_retrieve(query: str, k: int = 20):
+    """
+    Restituisce i risultati del dense retrieval da Chroma.
+    Usata da retrieval.py per costruire il retrieval ibrido.
+    """
+    vector_store = load_vector_store()
+    return vector_store.similarity_search_with_score(query, k=k)
 
 
 def main() -> None:

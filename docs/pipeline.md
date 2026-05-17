@@ -21,6 +21,12 @@ chunking.py
   -> chunks.jsonl + stats.json dei chunk
 vector_store.py
   -> embedding dei chunk + Chroma vector store
+retrieval.py
+  -> BM25 + dense retrieval + fusione RRF dei risultati
+rag_chain.py
+  -> prompt RAG + generazione risposta con LLM locale
+chatbot.py
+  -> interfaccia CLI per interrogare il chatbot
 ```
 
 ## 1. Discovery
@@ -150,7 +156,7 @@ Ogni chunk conserva il testo da indicizzare insieme ai metadati principali del d
 
 La fase successiva usa `chunks.jsonl` per generare gli embedding e popolare il vector store.
 
-## 6. Vecor Store
+## 6. Vector Store
 
 Creazione del vector store:
 
@@ -173,6 +179,94 @@ Responsabilità:
 - consente query semantiche di test tramite parametro --query.
 
 Il vector store non deve essere versionato su Git perché è un artefatto generato localmente.
+
+## 7. Retrieval Ibrido
+
+Comando:
+
+```bash
+python src/retrieval.py --query "Quali corsi di laurea offre il DIEM?"
+```
+Comando con numero finale di risultati personalizzato:
+
+```bash
+python src/retrieval.py --query "Quali sono gli orari di ricevimento del professor Mario Vento?" --final-k 3
+```
+Responsabilità:
+
+- legge i chunk da `data/processed/chunks/chunks.jsonl`;
+- esegue retrieval lessicale tramite BM25;
+- esegue dense retrieval tramite il vector store Chroma creato da `vector_store.py`;
+- combina i risultati dei due retriever tramite Reciprocal Rank Fusion;
+- rimuove risultati ridondanti provenienti dallo stesso URL;
+- applica un rerank leggero basato sui metadati e sul tipo di query;
+- stampa i chunk finali con titolo, URL, breadcrumb, chunk ID e anteprima del contenuto.
+
+Il retrieval ibrido migliora la robustezza rispetto alla sola ricerca vettoriale:
+
+- BM25 è utile per nomi propri, docenti, sigle, codici corso, URL e parole chiave esatte;
+- il dense retrieval è utile per domande formulate in linguaggio naturale e semanticamente simili ai documenti;
+- la fusione RRF evita di confrontare direttamente score eterogenei prodotti da BM25 e Chroma.
+
+Il rerank leggero sui metadati gestisce alcuni casi frequenti:
+
+- domande su corsi di laurea e offerta formativa;
+- domande sugli orari di ricevimento di un docente specifico;
+- domande generiche sulla didattica;
+- penalizzazione di pagine in lingua inglese quando la query è in italiano;
+- penalizzazione di pagine relative ad anni accademici vecchi se la query non specifica un anno;
+- deduplica dei risultati provenienti dallo stesso URL.
+
+Questa fase non genera ancora la risposta finale: produce i chunk più rilevanti che saranno poi forniti al modello LLM nella fase RAG completa.
+
+## 8. RAG Generation
+
+Comando:
+
+```bash
+python src/chatbot.py
+```
+
+Comando con modello e numero di chunk personalizzati:
+
+```bash
+python src/chatbot.py --model llama3.2:3b --final-k 3
+```
+
+Responsabilità:
+
+- riceve una domanda utente da terminale;
+- usa `retrieval.py` per recuperare i chunk più rilevanti dal corpus DIEM;
+- costruisce un contesto compatto usando titolo, URL, breadcrumb, chunk ID e contenuto dei chunk;
+- genera un prompt RAG vincolato alle fonti recuperate;
+- invia il prompt a un modello instruct locale tramite Ollama;
+- restituisce una risposta in italiano insieme alle fonti utilizzate.
+
+La generazione avviene tramite il modulo `src/rag_chain.py`, che implementa la pipeline:
+
+```text
+domanda utente
+  -> hybrid retrieval
+  -> costruzione contesto
+  -> prompt RAG
+  -> chiamata Ollama
+  -> risposta + fonti
+```
+
+Il prompt impone al modello di usare esclusivamente il contesto fornito.
+Se il contesto non contiene informazioni sufficienti, il chatbot deve dichiarare che l'informazione non è disponibile nelle fonti DIEM indicizzate.
+Se la domanda è fuori dominio rispetto al DIEM, il chatbot deve segnalarlo invece di produrre una risposta non fondata.
+
+Le variabili principali sono configurate tramite `.env`:
+
+```env
+OLLAMA_MODEL=llama3.2:3b
+OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+RAG_FINAL_K=3
+RAG_MAX_CONTEXT_CHARS=6000
+```
+
+Questa fase completa la pipeline RAG end-to-end: i chunk recuperati dal retrieval ibrido vengono usati come contesto per generare una risposta controllata e accompagnata dalle fonti.
 
 ## Output Principali
 

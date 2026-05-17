@@ -186,7 +186,7 @@ async def process_item(
         return processed_item(make_record(item, "html", "failed", error=str(error), raw_path=None))
 
     final_url = candidate.final_url
-    context = filter_context(item.url)
+    context = filter_context(item.discovered_from)
     additional_visited = [final_url] if final_url != item.url else []
 
     ok_final, final_reason = can_traverse_url(final_url, config, context)
