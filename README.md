@@ -138,7 +138,7 @@ docs/pipeline.md
 ## Note
 
 `data/processed/markdown/` contiene il Markdown pulito da indicizzare;
-`data/processed/raw_markdown/` conserva l'estrazione originale per debug;
+`data/processed/markdown_raw/` conserva l'estrazione originale per debug;
 `data/processed/chunks/` contiene i chunk contestuali prodotti per embedding e retrieval;
 `data/vectorstore/` contiene il vector store Chroma generato localmente.
 

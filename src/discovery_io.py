@@ -118,6 +118,21 @@ def validate_config(config: dict) -> None:
     if config["crawler"].get("refresh_after_days", 0) < 0:
         raise ValueError("crawler.refresh_after_days deve essere >= 0.")
 
+    pdf_positive_values = (
+        "pdf_max_bytes",
+        "pdf_extraction_workers",
+        "pdf_max_concurrent_downloads",
+    )
+    for key in pdf_positive_values:
+        if key in config["crawler"] and config["crawler"][key] <= 0:
+            raise ValueError(f"crawler.{key} deve essere > 0.")
+
+    if config["crawler"].get("pdf_download_delay_seconds", 0) < 0:
+        raise ValueError("crawler.pdf_download_delay_seconds deve essere >= 0.")
+
+    if config["crawler"].get("pdf_skip_recent_days", 0) < 0:
+        raise ValueError("crawler.pdf_skip_recent_days deve essere >= 0.")
+
     allowed_domains = {
         str(domain).lower()
         for domain in config["crawler"]["allowed_domains"]
@@ -213,6 +228,7 @@ def make_record(
         "domain": urlparse(document_url).netloc,
         "depth": item.depth,
         "discovered_from": item.discovered_from,
+        "origin_seed": item.origin_seed,
         "type": source_type,
         "status": status,
         "indexable": indexable,

@@ -26,6 +26,9 @@ class CrawlItem:
     depth: int
     discovered_from: str
     force_revisit: bool = False
+    # Seed/bootstrap root da cui discende il ramo; resta opzionale per leggere
+    # checkpoint e frontier prodotti dalle versioni precedenti della pipeline.
+    origin_seed: str | None = None
 
 
 @dataclass

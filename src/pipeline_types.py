@@ -40,6 +40,7 @@ class DiscoveryRecord(TypedDict, total=False):
     domain: str
     depth: int
     discovered_from: str
+    origin_seed: str | None
     type: DiscoveryType
     status: DiscoveryStatus
     indexable: bool
@@ -98,6 +99,7 @@ class ProcessedRecord(TypedDict, total=False):
     indexable: bool
     content_length: int
     error: str
+    error_kind: str
     is_duplicate: bool
     duplicate_of: str | None
     duplicate_of_url: str | None

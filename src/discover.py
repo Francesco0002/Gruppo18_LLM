@@ -68,6 +68,67 @@ def count_items_by_depth(
     return {str(depth): counts[depth] for depth in sorted(counts)}
 
 
+def item_origin_seed(item: CrawlItem) -> str:
+    """Chiave di fairness del ramo, compatibile anche con stati legacy."""
+    if item.origin_seed:
+        return item.origin_seed
+    if item.depth == 0:
+        return item.url
+    # Nei vecchi checkpoint non esisteva origin_seed: il parent immediato è la
+    # migliore informazione disponibile senza ricostruire l'intero grafo.
+    return item.discovered_from
+
+
+def count_items_by_seed_and_depth(
+    items: list[CrawlItem] | deque[CrawlItem],
+    *,
+    force_revisit: bool | None = None,
+) -> dict[str, dict[str, int]]:
+    """Conta il lavoro residuo per origine e depth, utile a vedere rami sbilanciati."""
+    counts: dict[str, Counter[int]] = {}
+    for item in items:
+        if force_revisit is not None and item.force_revisit != force_revisit:
+            continue
+        seed_counts = counts.setdefault(item_origin_seed(item), Counter())
+        seed_counts[item.depth] += 1
+    return {
+        seed: {str(depth): seed_counts[depth] for depth in sorted(seed_counts)}
+        for seed, seed_counts in sorted(counts.items())
+    }
+
+
+def fair_bfs_order(items: list[CrawlItem]) -> list[CrawlItem]:
+    """Ordina prima per depth e poi alterna i rami dei seed nello stesso livello."""
+    by_depth: dict[int, list[CrawlItem]] = {}
+    for item in items:
+        by_depth.setdefault(item.depth, []).append(item)
+
+    ordered: list[CrawlItem] = []
+    for depth in sorted(by_depth):
+        per_seed: dict[str, deque[CrawlItem]] = {}
+        for item in by_depth[depth]:
+            per_seed.setdefault(item_origin_seed(item), deque()).append(item)
+
+        # Un giro prende al massimo un URL per seed, poi riparte: un ramo molto
+        # prolifico non può occupare tutta la capacità del livello da solo.
+        seed_order = list(per_seed)
+        while seed_order:
+            next_round: list[str] = []
+            for seed in seed_order:
+                ordered.append(per_seed[seed].popleft())
+                if per_seed[seed]:
+                    next_round.append(seed)
+            seed_order = next_round
+    return ordered
+
+
+def rebalance_queue_for_fair_bfs(state: CrawlState) -> None:
+    """Rende esplicita la BFS equa prima di salvare o scegliere il batch seguente."""
+    if len(state.queue) < 2:
+        return
+    state.queue = deque(fair_bfs_order(list(state.queue)))
+
+
 def count_recorded_html_by_depth(output_file: Path) -> dict[str, int]:
     """Conta gli HTML prodotti nella run corrente, separandoli dagli URL PDF terminali."""
     if not output_file.exists():
@@ -98,7 +159,13 @@ def eligible_reexpansion_items(
 ) -> list[CrawlItem]:
     """Pagine di bordo già viste che possono aprire il livello successivo."""
     return [
-        CrawlItem(item.url, item.depth, item.discovered_from, force_revisit=True)
+        CrawlItem(
+            item.url,
+            item.depth,
+            item.discovered_from,
+            force_revisit=True,
+            origin_seed=item.origin_seed,
+        )
         for item in persistent_state.expansion_backlog
         if item.depth < max_depth
     ]
@@ -121,7 +188,7 @@ def due_bootstrap_items(
             reference_time,
         ):
             continue
-        items.append(CrawlItem(url, 0, source))
+        items.append(CrawlItem(url, 0, source, origin_seed=url))
     return items
 
 
@@ -153,7 +220,7 @@ def create_initial_state(
         deduped_items.append(item)
         seen_urls.add(item.url)
 
-    queue = deque(deduped_items)
+    queue = deque(fair_bfs_order(deduped_items))
     return CrawlState(
         queue=queue,
         queued={item.url for item in queue},
@@ -345,7 +412,14 @@ def enqueue_links(
             continue
         if link in state.known_urls and not is_due_for_refresh(state.known_urls[link], config):
             continue
-        state.queue.append(CrawlItem(link, parent.depth + 1, parent.url))
+        state.queue.append(
+            CrawlItem(
+                link,
+                parent.depth + 1,
+                parent.url,
+                origin_seed=parent.origin_seed,
+            )
+        )
         state.queued.add(link)
 
     return True
@@ -383,6 +457,7 @@ def update_expansion_backlog(
         item.url,
         item.depth,
         item.discovered_from,
+        origin_seed=item.origin_seed,
     )
 
 
@@ -458,6 +533,7 @@ async def run_discovery(config: dict) -> dict:
         else:
             print("Checkpoint trovato: riprendo il crawl precedente.")
             recorded_pdf_urls = load_recorded_pdf_urls(output_file)
+            rebalance_queue_for_fair_bfs(state)
 
         max_total_urls = config["crawler"]["max_total_urls"]
         exhausted_without_batch = False
@@ -541,6 +617,10 @@ async def run_discovery(config: dict) -> dict:
                         state,
                     )
 
+                # Dopo aver accodato tutti i figli del batch, ripristiniamo
+                # l'alternanza per seed prima di scegliere il batch successivo.
+                rebalance_queue_for_fair_bfs(state)
+
                 save_checkpoint(
                     state,
                     config,
@@ -592,7 +672,15 @@ async def run_discovery(config: dict) -> dict:
         "frontier_loaded": frontier_loaded,
         "frontier_remaining": len(state.queue),
         "frontier_before_by_depth": frontier_before_by_depth,
+        "frontier_before_by_seed_and_depth": count_items_by_seed_and_depth(
+            persistent_state.frontier,
+            force_revisit=False,
+        ),
         "frontier_after_by_depth": count_items_by_depth(
+            state.queue,
+            force_revisit=False,
+        ),
+        "frontier_after_by_seed_and_depth": count_items_by_seed_and_depth(
             state.queue,
             force_revisit=False,
         ),

@@ -15,6 +15,7 @@ from ingest import (  # noqa: E402
     build_depth_coverage,
     build_extraction_stats,
     build_pdf_coverage,
+    compact_seed_rows,
     compact_depth_rows,
     discovery_failures_by_kind,
 )
@@ -148,13 +149,15 @@ class DepthCoverageTests(unittest.TestCase):
         self.assertEqual(
             compact_depth_rows(
                 coverage["depths"],
-                found_by_depth={"1": 5},
+                html_found_by_depth={"1": 3},
+                pdf_found_by_depth={"1": 2},
                 visited_html_by_depth={"1": 3},
             ),
             [
                 {
                     "depth": 0,
-                    "found_in_run": 0,
+                    "html_found_in_run": 0,
+                    "pdf_found_in_run": 0,
                     "visited_html_in_run": 0,
                     "pending_new": 0,
                     "pending_reexpansion": 0,
@@ -164,13 +167,40 @@ class DepthCoverageTests(unittest.TestCase):
                 },
                 {
                     "depth": 1,
-                    "found_in_run": 5,
+                    "html_found_in_run": 3,
+                    "pdf_found_in_run": 2,
                     "visited_html_in_run": 3,
                     "pending_new": 2,
                     "pending_reexpansion": 0,
                     "pending_from_lower_depths": 0,
                     "complete": False,
                     "visited_complete": False,
+                },
+            ],
+        )
+
+    def test_compact_seed_rows_shows_branch_balance(self) -> None:
+        self.assertEqual(
+            compact_seed_rows(
+                {"seed-a": {"0": 1, "1": 3}, "seed-b": {"0": 1, "1": 1}},
+                {"seed-a": {"1": 1}},
+                {"seed-a": {"0": 1, "1": 3}, "seed-b": {"0": 1, "1": 1}},
+                {"seed-a": {"1": 1}},
+            ),
+            [
+                {
+                    "seed": "seed-a",
+                    "html_found_in_run_by_depth": {"0": 1, "1": 3},
+                    "pdf_found_in_run_by_depth": {"1": 1},
+                    "visited_html_in_run_by_depth": {"0": 1, "1": 3},
+                    "pending_new_by_depth": {"1": 1},
+                },
+                {
+                    "seed": "seed-b",
+                    "html_found_in_run_by_depth": {"0": 1, "1": 1},
+                    "pdf_found_in_run_by_depth": {},
+                    "visited_html_in_run_by_depth": {"0": 1, "1": 1},
+                    "pending_new_by_depth": {},
                 },
             ],
         )
@@ -189,7 +219,7 @@ class DepthCoverageTests(unittest.TestCase):
                         "pdf_pending_discovered": 5,
                         "skipped_recent": 1,
                         "pdf_candidates": 4,
-                        "downloaded": 4,
+                        "ready_for_extraction": 4,
                         "extracted_ok": 3,
                         "failed": 1,
                         "too_large": 0,
@@ -204,13 +234,30 @@ class DepthCoverageTests(unittest.TestCase):
                     "failed": 1,
                 },
                 "pdf": {
-                    "pending_found": 5,
-                    "skipped_recent": 1,
-                    "selected_for_processing": 4,
-                    "downloaded": 4,
-                    "extracted_ok": 3,
-                    "failed": 1,
-                    "too_large": 0,
+                    "summary": {
+                        "pending_found": 5,
+                        "selected_for_processing": 4,
+                        "extracted_ok": 3,
+                        "failed": 1,
+                        "too_large": 0,
+                    },
+                    "volume": {
+                        "skipped_recent": 1,
+                        "ready_for_extraction": 4,
+                        "network_downloaded": 0,
+                        "reused_raw": 0,
+                        "downloaded_bytes": 0,
+                    },
+                    "performance": {
+                        "elapsed_seconds": 0,
+                        "download_seconds": 0,
+                        "extraction_seconds": 0,
+                        "throughput_pdf_per_minute": 0,
+                        "executor_backend": None,
+                    },
+                    "errors": {
+                        "failure_kinds": {},
+                    },
                 },
             },
         )
@@ -238,29 +285,58 @@ class DepthCoverageTests(unittest.TestCase):
                 "pdf_download_decision": "allowed_stable_document",
                 "pdf_match_keywords": ["guida"],
             },
+            {
+                "type": "pdf",
+                "status": "pending_download",
+                "url": "https://www.diem.unisa.it/uploads/verbale-bando.pdf",
+                "discovered_from": "https://www.diem.unisa.it/home/bandi?anno=2024",
+                "pdf_source_section": "home_bandi",
+                "pdf_download_decision": "allowed_opportunity_document",
+                "pdf_match_keywords": ["bando"],
+            },
         ]
 
         self.assertEqual(
             build_pdf_coverage(records),
             {
-                "pdfs_found": 3,
-                "pdfs_blocked_by_robots": 2,
-                "unique_pdfs_blocked_by_robots": 2,
-                "blocked_by_robots_by_section": {
-                    "home_bandi": 1,
-                    "didattica": 1,
+                "summary": {
+                    "found": 4,
+                    "allowed_by_policy": 2,
+                    "blocked_by_robots": 2,
+                    "review_candidates": 1,
+                    "intentionally_excluded": 1,
                 },
-                "blocked_by_robots_by_keyword": {
-                    "bando": 1,
-                    "graduatoria": 1,
-                    "regolamento": 1,
+                "allowed_by_policy": {
+                    "by_section": {
+                        "didattica": 1,
+                        "home_bandi": 1,
+                    },
+                    "by_keyword": {
+                        "bando": 1,
+                        "guida": 1,
+                    },
                 },
-                "pdfs_allowed_by_policy": 1,
-                "pdfs_allowed_by_policy_by_section": {
-                    "didattica": 1,
+                "blocked_by_robots": {
+                    "records": 2,
+                    "unique_pdfs": 2,
+                    "by_section": {
+                        "home_bandi": 1,
+                        "didattica": 1,
+                    },
+                    "by_keyword": {
+                        "bando": 1,
+                        "graduatoria": 1,
+                        "regolamento": 1,
+                    },
                 },
-                "pdfs_allowed_by_policy_by_keyword": {
-                    "guida": 1,
+                "allowed_suspicious_attachments": {
+                    "count": 1,
+                    "by_section": {
+                        "home_bandi": 1,
+                    },
+                    "by_hint": {
+                        "verbale": 1,
+                    },
                 },
                 "blocked_review_candidates": {
                     "count": 1,

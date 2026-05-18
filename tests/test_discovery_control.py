@@ -15,6 +15,7 @@ from discover import (  # noqa: E402
     create_initial_state,
     discovery_stop_reason,
     enqueue_links,
+    fair_bfs_order,
     take_batch,
     update_expansion_backlog,
 )
@@ -45,6 +46,51 @@ def base_config() -> dict:
 
 
 class DiscoveryControlTests(unittest.TestCase):
+    def test_bootstrap_items_track_their_origin_seed(self) -> None:
+        seed_a = "https://www.diem.unisa.it/a"
+        seed_b = "https://www.diem.unisa.it/b"
+
+        state = create_initial_state([seed_a, seed_b], [])
+
+        self.assertEqual(
+            [(item.url, item.origin_seed) for item in state.queue],
+            [(seed_a, seed_a), (seed_b, seed_b)],
+        )
+
+    def test_fair_bfs_order_round_robins_seed_branches_within_depth(self) -> None:
+        seed_a = "https://www.diem.unisa.it/a"
+        seed_b = "https://www.diem.unisa.it/b"
+        items = [
+            CrawlItem(f"{seed_a}/1", 1, seed_a, origin_seed=seed_a),
+            CrawlItem(f"{seed_a}/2", 1, seed_a, origin_seed=seed_a),
+            CrawlItem(f"{seed_a}/3", 1, seed_a, origin_seed=seed_a),
+            CrawlItem(f"{seed_b}/1", 1, seed_b, origin_seed=seed_b),
+            CrawlItem(f"{seed_b}/2", 1, seed_b, origin_seed=seed_b),
+        ]
+
+        self.assertEqual(
+            [item.url for item in fair_bfs_order(items)],
+            [
+                f"{seed_a}/1",
+                f"{seed_b}/1",
+                f"{seed_a}/2",
+                f"{seed_b}/2",
+                f"{seed_a}/3",
+            ],
+        )
+
+    def test_fair_bfs_order_never_promotes_deeper_items_before_lower_depths(self) -> None:
+        seed = "https://www.diem.unisa.it/"
+        items = [
+            CrawlItem(f"{seed}deep", 3, seed, origin_seed=seed),
+            CrawlItem(f"{seed}shallow", 2, seed, origin_seed=seed),
+        ]
+
+        self.assertEqual(
+            [item.depth for item in fair_bfs_order(items)],
+            [2, 3],
+        )
+
     def test_high_value_pdf_exception_is_limited_to_central_diem_sections(self) -> None:
         class DenyRobots:
             async def can_fetch(self, _url: str) -> bool:
@@ -157,6 +203,40 @@ class DiscoveryControlTests(unittest.TestCase):
 
         self.assertEqual([record["status"] for record in records], ["robots_denied"] * 3)
 
+    def test_bandi_verbal_and_schedule_attachments_do_not_pass_as_main_opportunities(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/verbale-colloquio-bando.pdf",
+                        "text": "PDF",
+                    },
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/avviso-differimento-colloquio-borsa.pdf",
+                        "text": "PDF",
+                    },
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/elenco-progetti-con-borsa.pdf",
+                        "text": "PDF",
+                    },
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/dr-scorrimento-informatica-ii-bando.pdf",
+                        "text": "PDF",
+                    },
+                ],
+                "https://www.diem.unisa.it/home/bandi",
+                1,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual([record["status"] for record in records], ["robots_denied"] * 4)
+
     def test_teaching_operations_pdf_is_allowed_from_didactics(self) -> None:
         class DenyRobots:
             async def can_fetch(self, _url: str) -> bool:
@@ -186,6 +266,53 @@ class DiscoveryControlTests(unittest.TestCase):
             records[0]["pdf_download_decision"],
             "allowed_teaching_operations_document",
         )
+
+    def test_informative_rescue_calendar_is_allowed_but_generic_rescue_calendar_is_not(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/calendario-prove-in-itinere.pdf",
+                        "text": "PDF",
+                    }
+                ],
+                (
+                    "https://www.diem.unisa.it/unisa-rescue-page/dettaglio/id/1402/"
+                    "module/475/row/29463/calendario-prove-in-itinere-diem"
+                ),
+                2,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+        generic_records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/calendario-evento.pdf",
+                        "text": "PDF",
+                    }
+                ],
+                (
+                    "https://www.diem.unisa.it/unisa-rescue-page/dettaglio/id/1413/"
+                    "module/487/row/3850/incontro-interdisciplinare"
+                ),
+                2,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual(records[0]["status"], "pending_download")
+        self.assertEqual(
+            records[0]["pdf_download_decision"],
+            "allowed_informative_calendar_document",
+        )
+        self.assertEqual(generic_records[0]["status"], "robots_denied")
 
     def test_international_program_pdf_is_allowed_from_international_section(self) -> None:
         class DenyRobots:
@@ -492,6 +619,30 @@ class DiscoveryControlTests(unittest.TestCase):
 
         self.assertEqual(state.allowed_teacher_profiles, {"mario.rossi"})
         self.assertEqual(list(state.queue), [CrawlItem(teacher, 2, parent.url)])
+
+    def test_enqueue_links_propagates_origin_seed_for_new_runs(self) -> None:
+        seed = "https://www.diem.unisa.it/"
+        parent = CrawlItem(
+            "https://www.diem.unisa.it/dipartimento",
+            1,
+            seed,
+            origin_seed=seed,
+        )
+        child = "https://www.diem.unisa.it/dipartimento/personale"
+        state = CrawlState(
+            queue=deque(),
+            queued=set(),
+            visited=set(),
+            seen_documents=set(),
+            domain_counts=Counter(),
+        )
+
+        enqueue_links(parent, [child], state, base_config())
+
+        self.assertEqual(
+            list(state.queue),
+            [CrawlItem(child, 2, parent.url, origin_seed=seed)],
+        )
 
     def test_boundary_page_moves_in_and_out_of_expansion_backlog(self) -> None:
         item = CrawlItem("https://www.diem.unisa.it/a", 1, "parent")

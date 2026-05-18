@@ -28,7 +28,18 @@ from uuid import uuid4
 
 from discover import run_discovery
 from discovery_io import load_config, load_discovery_state, project_path, validate_config
-from extract_pdf import run_extract_pdf
+from extract_pdf import run_extract_pdf_async
+from pdf_policy import (
+    COURSE_EVIDENCE_PDF_KEYWORDS,
+    INTERNATIONAL_PROGRAM_PDF_KEYWORDS,
+    MAIN_OPPORTUNITY_PDF_KEYWORDS,
+    OPPORTUNITY_ATTACHMENT_HINTS,
+    REPORTABLE_PDF_KEYWORDS,
+    STABLE_DOCUMENT_PDF_KEYWORDS,
+    TEACHING_OPERATIONS_PDF_KEYWORDS,
+    is_main_opportunity_text,
+    pdf_source_section_from_url,
+)
 from pipeline_io import (
     latest_record_indexes,
     load_jsonl,
@@ -92,8 +103,14 @@ def mark_duplicate_documents(
         crawled_str = str(record.get("last_crawled", ""))
         try:
             crawled_dt = _dt.fromisoformat(crawled_str.replace("Z", "+00:00"))
+            if crawled_dt.tzinfo is None:
+                # Le run piu vecchie possono contenere timestamp naive: li
+                # trattiamo come UTC per confrontarli con quelli timezone-aware.
+                crawled_dt = crawled_dt.replace(tzinfo=UTC)
         except ValueError:
-            crawled_dt = _dt.min
+            # Un timestamp corrotto non deve impedire di rigenerare gli stats.
+            # Va in fondo all'ordinamento, ma il record resta osservabile.
+            crawled_dt = _dt.min.replace(tzinfo=UTC)
         return source_priority, crawled_dt, index
 
     for index in sorted(current_indexes, key=duplicate_priority):
@@ -152,80 +169,11 @@ def discovery_failures_by_kind(records: list[dict]) -> dict[str, int]:
     return {kind: counts[kind] for kind in sorted(counts)}
 
 
-# Keyword mostrate nei report PDF: servono a spiegare cosa viene perso o ammesso.
-REPORTABLE_PDF_KEYWORDS = (
-    "bando",
-    "graduatoria",
-    "regolamento",
-    "linee-guida",
-    "guida",
-    "manifesto",
-    "piano-di-studi",
-    "calendario",
-    "schedule",
-    "ofa",
-    "requirements",
-    "accordi",
-    "erasmus",
-    "sua-cds",
-    "schede-sua",
-    "almalaurea",
-    "decreto",
-)
-STABLE_DOCUMENT_PDF_KEYWORDS = {
-    "regolamento",
-    "linee-guida",
-    "guida",
-    "manifesto",
-    "piano-di-studi",
-}
-# Stesse famiglie semantiche usate nella discovery, riprese qui solo per report.
-MAIN_OPPORTUNITY_PDF_KEYWORDS = {"bando", "call", "premio", "borsa", "concorso"}
-TEACHING_OPERATIONS_PDF_KEYWORDS = {"calendario", "schedule", "ofa", "requirements"}
-INTERNATIONAL_PROGRAM_PDF_KEYWORDS = {"accordo", "accordi", "erasmus"}
-COURSE_EVIDENCE_PDF_KEYWORDS = {"sua-cds", "schede-sua", "almalaurea"}
-OPPORTUNITY_ATTACHMENT_HINTS = {
-    "graduatoria",
-    "approvazione-atti",
-    "decreto",
-    "allegato",
-    "domanda",
-    "modello",
-    "locandina",
-    "manifesto-elettorale",
-    "scrutino",
-    "elettorato",
-    "faq",
-    "modulo",
-    "moduloadesione",
-    "presentazione",
-    "comunicato",
-    "avviso-proroga",
-    "proroga",
-}
 def pdf_source_section(record: dict) -> str:
     """Raggruppa il parent di un PDF in sezioni leggibili del sito."""
     if record.get("pdf_source_section"):
         return str(record["pdf_source_section"])
-    source = str(record.get("discovered_from", ""))
-    path = urlparse(source).path.lower().rstrip("/")
-    if path.startswith("/home/bandi"):
-        return "home_bandi"
-    if path.startswith("/home/news"):
-        return "home_news"
-    if path.startswith("/home/eventi"):
-        return "home_eventi"
-    if path.startswith("/didattica") or "/didattica/" in path:
-        return "didattica"
-    if path.startswith("/ricerca") or "/ricerca/" in path:
-        return "ricerca"
-    if path.startswith("/dipartimento") or "/dipartimento/" in path:
-        return "dipartimento"
-    if path.startswith("/international") or "/international/" in path:
-        return "international"
-    if path.startswith("/terza-missione"):
-        return "terza_missione"
-    return "other"
+    return pdf_source_section_from_url(str(record.get("discovered_from", "")))
 
 
 def pdf_filename_keywords(record: dict) -> set[str]:
@@ -245,21 +193,25 @@ def pdf_keyword_text(record: dict) -> str:
 
 def is_main_opportunity_record(record: dict) -> bool:
     """True per PDF principali di opportunità, non per allegati o risultati."""
+    return is_main_opportunity_text(pdf_keyword_text(record))
+
+
+def suspicious_allowed_attachment_hints(record: dict) -> set[str]:
+    """Hint accessori ancora presenti in PDF ammessi dalla policy."""
+    if record.get("pdf_download_decision") != "allowed_opportunity_document":
+        return set()
     text = pdf_keyword_text(record)
-    return (
-        any(keyword in text for keyword in MAIN_OPPORTUNITY_PDF_KEYWORDS)
-        and not any(hint in text for hint in OPPORTUNITY_ATTACHMENT_HINTS)
-    )
+    return {hint for hint in OPPORTUNITY_ATTACHMENT_HINTS if hint in text}
 
 
 def blocked_pdf_category(record: dict) -> str:
     """Classifica i PDF negati tra candidati da rivedere ed esclusioni volute."""
     section = pdf_source_section(record)
     keywords = pdf_filename_keywords(record)
-    has_stable_document_keyword = bool(keywords & STABLE_DOCUMENT_PDF_KEYWORDS)
-    has_teaching_operations_keyword = bool(keywords & TEACHING_OPERATIONS_PDF_KEYWORDS)
-    has_international_program_keyword = bool(keywords & INTERNATIONAL_PROGRAM_PDF_KEYWORDS)
-    has_course_evidence_keyword = bool(keywords & COURSE_EVIDENCE_PDF_KEYWORDS)
+    has_stable_document_keyword = bool(keywords & set(STABLE_DOCUMENT_PDF_KEYWORDS))
+    has_teaching_operations_keyword = bool(keywords & set(TEACHING_OPERATIONS_PDF_KEYWORDS))
+    has_international_program_keyword = bool(keywords & set(INTERNATIONAL_PROGRAM_PDF_KEYWORDS))
+    has_course_evidence_keyword = bool(keywords & set(COURSE_EVIDENCE_PDF_KEYWORDS))
 
     if section == "home_bandi" and not is_main_opportunity_record(record):
         return "intentionally_excluded"
@@ -310,6 +262,11 @@ def build_pdf_coverage(records: list[dict]) -> dict:
         for record in unique_allowed
         for keyword in pdf_filename_keywords(record)
     )
+    suspicious_allowed = [
+        record
+        for record in unique_allowed
+        if suspicious_allowed_attachment_hints(record)
+    ]
     blocked_by_category = {
         "review_candidate": [
             record
@@ -329,23 +286,45 @@ def build_pdf_coverage(records: list[dict]) -> dict:
     }
 
     return {
-        "pdfs_found": len(pdf_records),
-        "pdfs_blocked_by_robots": len(robots_denied),
-        "unique_pdfs_blocked_by_robots": len(unique_denied),
-        "blocked_by_robots_by_section": dict(
-            Counter(pdf_source_section(record) for record in unique_denied)
-        ),
-        "blocked_by_robots_by_keyword": {
-            keyword: keyword_counts[keyword]
-            for keyword in sorted(keyword_counts)
+        "summary": {
+            "found": len(pdf_records),
+            "allowed_by_policy": len(unique_allowed),
+            "blocked_by_robots": len(unique_denied),
+            "review_candidates": len(blocked_by_category["review_candidate"]),
+            "intentionally_excluded": len(blocked_by_category["intentionally_excluded"]),
         },
-        "pdfs_allowed_by_policy": len(unique_allowed),
-        "pdfs_allowed_by_policy_by_section": dict(
-            Counter(pdf_source_section(record) for record in unique_allowed)
-        ),
-        "pdfs_allowed_by_policy_by_keyword": {
-            keyword: allowed_keyword_counts[keyword]
-            for keyword in sorted(allowed_keyword_counts)
+        "allowed_by_policy": {
+            "by_section": dict(
+                Counter(pdf_source_section(record) for record in unique_allowed)
+            ),
+            "by_keyword": {
+                keyword: allowed_keyword_counts[keyword]
+                for keyword in sorted(allowed_keyword_counts)
+            },
+        },
+        "blocked_by_robots": {
+            "records": len(robots_denied),
+            "unique_pdfs": len(unique_denied),
+            "by_section": dict(
+                Counter(pdf_source_section(record) for record in unique_denied)
+            ),
+            "by_keyword": {
+                keyword: keyword_counts[keyword]
+                for keyword in sorted(keyword_counts)
+            },
+        },
+        "allowed_suspicious_attachments": {
+            "count": len(suspicious_allowed),
+            "by_section": dict(
+                Counter(pdf_source_section(record) for record in suspicious_allowed)
+            ),
+            "by_hint": dict(
+                Counter(
+                    hint
+                    for record in suspicious_allowed
+                    for hint in suspicious_allowed_attachment_hints(record)
+                )
+            ),
         },
         "blocked_review_candidates": {
             "count": len(blocked_by_category["review_candidate"]),
@@ -419,9 +398,42 @@ def html_records_by_depth(records: list[dict]) -> dict[str, int]:
     return {depth: counts[depth] for depth in sorted(counts, key=int)}
 
 
+def records_by_depth(records: list[dict], source_type: str) -> dict[str, int]:
+    """Conta record di un solo tipo per non mescolare HTML BFS e PDF terminali."""
+    counts = Counter(
+        str(record["depth"])
+        for record in records
+        if record.get("type") == source_type and isinstance(record.get("depth"), int)
+    )
+    return {depth: counts[depth] for depth in sorted(counts, key=int)}
+
+
+def records_by_seed_and_depth(
+    records: list[dict],
+    *,
+    source_type: str | None = None,
+) -> dict[str, dict[str, int]]:
+    """Conta record per ramo di origine e depth quando il metadato è disponibile."""
+    counts: dict[str, Counter[int]] = {}
+    for record in records:
+        if source_type is not None and record.get("type") != source_type:
+            continue
+        origin_seed = record.get("origin_seed")
+        depth = record.get("depth")
+        if not origin_seed or not isinstance(depth, int):
+            continue
+        seed_counts = counts.setdefault(origin_seed, Counter())
+        seed_counts[depth] += 1
+    return {
+        seed: {str(depth): seed_counts[depth] for depth in sorted(seed_counts)}
+        for seed, seed_counts in sorted(counts.items())
+    }
+
+
 def compact_depth_rows(
     coverage_depths: list[dict],
-    found_by_depth: dict[str, int],
+    html_found_by_depth: dict[str, int],
+    pdf_found_by_depth: dict[str, int],
     visited_html_by_depth: dict[str, int],
 ) -> list[dict]:
     """Unisce copertura, URL trovati e HTML visitati in una tabella per depth."""
@@ -430,7 +442,8 @@ def compact_depth_rows(
         depth_key = str(depth["depth"])
         row = {
             "depth": depth["depth"],
-            "found_in_run": found_by_depth.get(depth_key, 0),
+            "html_found_in_run": html_found_by_depth.get(depth_key, 0),
+            "pdf_found_in_run": pdf_found_by_depth.get(depth_key, 0),
             "visited_html_in_run": visited_html_by_depth.get(depth_key, 0),
             "pending_new": depth["pending_new_at_depth"],
             "pending_reexpansion": depth["pending_reexpansion_at_depth"],
@@ -444,11 +457,54 @@ def compact_depth_rows(
     return rows
 
 
+def compact_seed_rows(
+    html_found_by_seed_and_depth: dict[str, dict[str, int]],
+    pdf_found_by_seed_and_depth: dict[str, dict[str, int]],
+    visited_html_by_seed_and_depth: dict[str, dict[str, int]],
+    pending_by_seed_and_depth: dict[str, dict[str, int]],
+) -> list[dict]:
+    """Rende leggibile il bilanciamento BFS tra seed senza duplicare zeri inutili."""
+    seeds = sorted(
+        {
+            *html_found_by_seed_and_depth,
+            *pdf_found_by_seed_and_depth,
+            *visited_html_by_seed_and_depth,
+            *pending_by_seed_and_depth,
+        }
+    )
+    return [
+        {
+            "seed": seed,
+            "html_found_in_run_by_depth": html_found_by_seed_and_depth.get(seed, {}),
+            "pdf_found_in_run_by_depth": pdf_found_by_seed_and_depth.get(seed, {}),
+            "visited_html_in_run_by_depth": visited_html_by_seed_and_depth.get(seed, {}),
+            "pending_new_by_depth": pending_by_seed_and_depth.get(seed, {}),
+        }
+        for seed in seeds
+    ]
+
+
 def frontier_by_depth_from_state(config: dict) -> dict[str, int]:
     """Conta solo gli URL nuovi residui, escludendo le riespansioni."""
     state = load_discovery_state(config)
     counts = Counter(item.depth for item in state.frontier if not item.force_revisit)
     return {str(depth): counts[depth] for depth in sorted(counts)}
+
+
+def frontier_by_seed_and_depth_from_state(config: dict) -> dict[str, dict[str, int]]:
+    """Conta il lavoro residuo per seed, utile anche nei report `--stats-only`."""
+    state = load_discovery_state(config)
+    counts: dict[str, Counter[int]] = {}
+    for item in state.frontier:
+        if item.force_revisit:
+            continue
+        origin_seed = item.origin_seed or (item.url if item.depth == 0 else item.discovered_from)
+        seed_counts = counts.setdefault(origin_seed, Counter())
+        seed_counts[item.depth] += 1
+    return {
+        seed: {str(depth): seed_counts[depth] for depth in sorted(seed_counts)}
+        for seed, seed_counts in sorted(counts.items())
+    }
 
 
 def reexpansion_by_depth_from_state(config: dict) -> dict[str, int]:
@@ -602,10 +658,15 @@ def build_discovery_stats(config: dict, discover_stats: dict | None = None) -> d
     path = project_path(config["paths"]["discovered_urls_file"])
     records = load_jsonl(path)
     frontier_by_depth = frontier_by_depth_from_state(config)
+    frontier_by_seed_and_depth = frontier_by_seed_and_depth_from_state(config)
     reexpansion_by_depth = reexpansion_by_depth_from_state(config)
     checkpoint_status, stop_reason = checkpoint_summary(config)
-    found_by_depth = dict(Counter(str(record.get("depth", "missing")) for record in records))
+    html_found_by_depth = records_by_depth(records, "html")
+    pdf_found_by_depth = records_by_depth(records, "pdf")
     visited_html_by_depth = html_records_by_depth(records)
+    html_found_by_seed_and_depth = records_by_seed_and_depth(records, source_type="html")
+    pdf_found_by_seed_and_depth = records_by_seed_and_depth(records, source_type="pdf")
+    visited_html_by_seed_and_depth = records_by_seed_and_depth(records, source_type="html")
     coverage = build_depth_coverage(
         config["crawler"]["max_depth"],
         frontier_by_depth,
@@ -617,6 +678,15 @@ def build_discovery_stats(config: dict, discover_stats: dict | None = None) -> d
     run_stats = discover_stats or {}
 
     report = {
+        "summary": {
+            "records_found": len(records),
+            "html_found": sum(record.get("type") == "html" for record in records),
+            "pdfs_found": sum(record.get("type") == "pdf" for record in records),
+            "robots_denied": sum(record.get("status") == "robots_denied" for record in records),
+            "coverage_verdict": coverage["verdict"],
+            "remaining_new_urls": coverage["frontier_remaining"],
+            "remaining_reexpansions": coverage["reexpansion_remaining"],
+        },
         "found": {
             "records": len(records),
             "by_status": count_by(records, "status"),
@@ -641,7 +711,8 @@ def build_discovery_stats(config: dict, discover_stats: dict | None = None) -> d
             "blocking_reasons": coverage["blocking_reasons"],
             "depths": compact_depth_rows(
                 coverage["depths"],
-                found_by_depth,
+                html_found_by_depth,
+                pdf_found_by_depth,
                 visited_html_by_depth,
             ),
         },
@@ -658,6 +729,14 @@ def build_discovery_stats(config: dict, discover_stats: dict | None = None) -> d
         report["run_progress"] = {
             "new_urls_before_by_depth": run_stats.get("frontier_before_by_depth", {}),
             "new_urls_after_by_depth": run_stats.get("frontier_after_by_depth", frontier_by_depth),
+            "new_urls_before_by_seed_and_depth": run_stats.get(
+                "frontier_before_by_seed_and_depth",
+                {},
+            ),
+            "new_urls_after_by_seed_and_depth": run_stats.get(
+                "frontier_after_by_seed_and_depth",
+                {},
+            ),
         }
         report["run"] = {
             key: value
@@ -669,6 +748,14 @@ def build_discovery_stats(config: dict, discover_stats: dict | None = None) -> d
             for key, value in report["run_progress"].items()
             if value not in ({}, [])
         }
+    seed_rows = compact_seed_rows(
+        html_found_by_seed_and_depth,
+        pdf_found_by_seed_and_depth,
+        visited_html_by_seed_and_depth,
+        run_stats.get("frontier_after_by_seed_and_depth", frontier_by_seed_and_depth),
+    )
+    if seed_rows:
+        report["coverage"]["by_seed"] = seed_rows
     report["remaining_work"] = {
         key: value
         for key, value in report["remaining_work"].items()
@@ -702,17 +789,23 @@ def build_processed_stats(
     ]
 
     return {
-        "records": len(records),
-        "history_records": duplicate_stats.get("history_records", len(records)),
-        "indexable_records": len(indexable_records),
-        "duplicates": duplicate_stats["duplicates"],
-        "unique_content_hashes": duplicate_stats["unique_content_hashes"],
-        "empty_or_short_records": len(empty_or_short_records),
-        "by_source": count_by(records, "source"),
-        "by_status": count_by(records, "status"),
-        "by_clean_status": count_by(records, "clean_status"),
-        "by_domain": dict(Counter(domain_from_record(record) for record in records)),
-        "markdown_chars": markdown_char_stats(records),
+        "summary": {
+            "current_records": len(records),
+            "history_records": duplicate_stats.get("history_records", len(records)),
+            "indexable_records": len(indexable_records),
+            "duplicates": duplicate_stats["duplicates"],
+            "unique_content_hashes": duplicate_stats["unique_content_hashes"],
+            "empty_or_short_records": len(empty_or_short_records),
+        },
+        "distribution": {
+            "by_source": count_by(records, "source"),
+            "by_status": count_by(records, "status"),
+            "by_clean_status": count_by(records, "clean_status"),
+            "by_domain": dict(Counter(domain_from_record(record) for record in records)),
+        },
+        "content": {
+            "markdown_chars": markdown_char_stats(records),
+        },
     }
 
 
@@ -731,13 +824,30 @@ def build_extraction_stats(step_stats: dict) -> dict:
 
     if pdf:
         report["pdf"] = {
-            "pending_found": pdf.get("pdf_pending_discovered", 0),
-            "skipped_recent": pdf.get("skipped_recent", 0),
-            "selected_for_processing": pdf.get("pdf_candidates", 0),
-            "downloaded": pdf.get("downloaded", 0),
-            "extracted_ok": pdf.get("extracted_ok", 0),
-            "failed": pdf.get("failed", 0),
-            "too_large": pdf.get("too_large", 0),
+            "summary": {
+                "pending_found": pdf.get("pdf_pending_discovered", 0),
+                "selected_for_processing": pdf.get("pdf_candidates", 0),
+                "extracted_ok": pdf.get("extracted_ok", 0),
+                "failed": pdf.get("failed", 0),
+                "too_large": pdf.get("too_large", 0),
+            },
+            "volume": {
+                "skipped_recent": pdf.get("skipped_recent", 0),
+                "ready_for_extraction": pdf.get("ready_for_extraction", 0),
+                "network_downloaded": pdf.get("network_downloaded", 0),
+                "reused_raw": pdf.get("reused_raw", 0),
+                "downloaded_bytes": pdf.get("downloaded_bytes", 0),
+            },
+            "performance": {
+                "elapsed_seconds": pdf.get("elapsed_seconds", 0),
+                "download_seconds": pdf.get("download_seconds", 0),
+                "extraction_seconds": pdf.get("extraction_seconds", 0),
+                "throughput_pdf_per_minute": pdf.get("throughput_pdf_per_minute", 0),
+                "executor_backend": pdf.get("executor_backend"),
+            },
+            "errors": {
+                "failure_kinds": pdf.get("failure_kinds", {}),
+            },
         }
 
     return report
@@ -754,6 +864,15 @@ def config_snapshot(config: dict) -> dict:
         "use_sitemap": crawler.get("use_sitemap", True),
         "respect_robots_txt": crawler.get("respect_robots_txt", True),
         "per_domain_limits": crawler["per_domain_limits"],
+        "pdf": {
+            "max_bytes": crawler.get("pdf_max_bytes"),
+            "extraction_workers": crawler.get("pdf_extraction_workers"),
+            "max_concurrent_downloads": crawler.get("pdf_max_concurrent_downloads"),
+            "download_delay_seconds": crawler.get("pdf_download_delay_seconds"),
+            "skip_recent_days": crawler.get("pdf_skip_recent_days"),
+            "force_reextract": crawler.get("pdf_force_reextract"),
+            "extraction": crawler.get("pdf_extraction", {}),
+        },
     }
 
 
@@ -776,18 +895,31 @@ def write_stats(
     """Genera le statistiche e le salva come ultimo report e nello storico run."""
     stats_path = project_path(config["paths"].get("processed_stats_file", "data/processed/stats.json"))
     run_stats_relative_path, run_stats_full_path = run_stats_path(config, run_id)
+    discovery = build_discovery_stats(config, step_stats.get("discover"))
+    processed = build_processed_stats(current_manifest_records, duplicate_stats)
+    extraction = build_extraction_stats(step_stats)
     stats = {
         "crawl_run_id": run_id,
         "generated_at": now_iso(),
         "stats_file": relative_path(stats_path),
         "run_stats_file": run_stats_relative_path,
+        "summary": {
+            "coverage_verdict": discovery["summary"]["coverage_verdict"],
+            "discovered_records": discovery["summary"]["records_found"],
+            "remaining_new_urls": discovery["summary"]["remaining_new_urls"],
+            "processed_records": processed["summary"]["current_records"],
+            "indexable_records": processed["summary"]["indexable_records"],
+            "duplicates": processed["summary"]["duplicates"],
+        },
         "config": config_snapshot(config),
-        "discovery": build_discovery_stats(config, step_stats.get("discover")),
-        "processed": build_processed_stats(current_manifest_records, duplicate_stats),
+        "discovery": discovery,
+        "processed": processed,
     }
-    extraction = build_extraction_stats(step_stats)
     if extraction:
         stats["extraction"] = extraction
+        if "pdf" in extraction:
+            stats["summary"]["pdf_extracted_ok"] = extraction["pdf"]["summary"]["extracted_ok"]
+            stats["summary"]["pdf_failed"] = extraction["pdf"]["summary"]["failed"]
 
     write_json(stats_path, stats)
     write_json(run_stats_full_path, stats)
@@ -796,13 +928,13 @@ def write_stats(
 
 def print_stats_summary(stats: dict) -> None:
     """Mostra un riepilogo breve a fine ingest."""
-    processed = stats["processed"]
+    processed = stats["processed"]["summary"]
     discovery = stats["discovery"]
 
     print("Ingest completato")
     print(f"- crawl_run_id: {stats['crawl_run_id']}")
-    print(f"- discovered_records: {discovery['found']['records']}")
-    print(f"- processed_records: {processed['records']}")
+    print(f"- discovered_records: {discovery['summary']['records_found']}")
+    print(f"- processed_records: {processed['current_records']}")
     print(f"- manifest_history_records: {processed['history_records']}")
     print(f"- indexable_records: {processed['indexable_records']}")
     print(f"- duplicates: {processed['duplicates']}")
@@ -822,7 +954,7 @@ async def run_pipeline_steps(config: dict) -> dict[str, dict]:
     step_stats["scrape"] = await run_scrape()
 
     print("\n[3/5] Estrazione PDF")
-    step_stats["extract_pdf"] = run_extract_pdf()
+    step_stats["extract_pdf"] = await run_extract_pdf_async(config)
     pdf_stats = step_stats["extract_pdf"]
     print(
         "PDF: "

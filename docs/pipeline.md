@@ -153,6 +153,7 @@ di copertura.
 
 Le statistiche in `data/processed/stats.json` sono organizzate in pochi blocchi:
 
+- `summary`: lettura immediata del run e dello stato corrente del corpus;
 - `discovery.run`: cosa è successo nella discovery del run corrente;
 - `discovery.found`: quali URL sono stati trovati nel run, per status, tipo e
   dominio;
@@ -166,10 +167,21 @@ Le statistiche in `data/processed/stats.json` sono organizzate in pochi blocchi:
   corrente;
 - `processed`: stato cumulativo del corpus già processato.
 
+Dentro i blocchi più densi, i campi sono raggruppati per scopo invece di stare
+tutti sullo stesso piano:
+
+- `discovery.summary`: dimensione del run, copertura e lavoro residuo;
+- `discovery.pdfs.summary`: bilancio dei PDF ammessi, bloccati e da rivedere;
+- `extraction.pdf.summary`, `volume`, `performance`, `errors`: esito operativo
+  della sola fase PDF;
+- `processed.summary`, `distribution`, `content`: stato corrente del corpus,
+  distribuzioni e statistiche testuali.
+
 La tabella `discovery.coverage.depths` concentra in un solo punto le metriche più
 utili per ogni livello:
 
-- `found_in_run`: URL trovati a quella depth nel run corrente;
+- `html_found_in_run`: pagine HTML trovate a quella depth nel run corrente;
+- `pdf_found_in_run`: PDF terminali trovati a quella depth nel run corrente;
 - `visited_html_in_run`: pagine HTML realmente visitate a quella depth;
 - `pending_new`: URL nuovi ancora da visitare;
 - `pending_reexpansion`: pagine già viste da riespandere per aprire il livello
@@ -178,6 +190,15 @@ utili per ogni livello:
   generare figli qui;
 - `complete`: nessun nuovo URL resta da visitare a quella depth;
 - `visited_complete`: la depth è stata visitata davvero fino in fondo.
+
+La frontier usa anche una fairness esplicita tra rami: l'ordine primario resta
+sempre la `depth`, ogni URL conserva `origin_seed` e, solo a parità di livello,
+la coda alterna i diversi seed in round-robin. Così la semantica BFS resta
+corretta anche tra run consecutive, ma con budget limitato un solo seed molto
+prolifico non può occupare quasi tutta la capacità del livello. La frontier
+persistita mantiene precedenza rispetto al nuovo bootstrap solo quando gli item
+hanno la stessa depth. `discovery.coverage.by_seed` mostra quanti URL sono stati
+trovati, visitati e restano pendenti per ciascun seed e depth.
 
 `discovery.remaining_work` mantiene solo il riepilogo necessario:
 
@@ -207,6 +228,9 @@ riepilogo compatto del run. Per capire se stai davvero chiudendo una depth:
 
 - confronta `discovery.run_progress.new_urls_before_by_depth` con
   `new_urls_after_by_depth`;
+- usa `new_urls_before_by_seed_and_depth` e
+  `new_urls_after_by_seed_and_depth` quando vuoi verificare che nessun seed stia
+  restando sistematicamente indietro;
 - guarda in `discovery.coverage.depths` se `pending_new` sta scendendo;
 - controlla `pending_reexpansion` se hai appena aumentato `max_depth`;
 - usa `future_expansion_backlog_by_depth` per sapere quanto lavoro si attiverà
@@ -216,6 +240,11 @@ riepilogo compatto del run. Per capire se stai davvero chiudendo una depth:
 I PDF restano inclusi nelle statistiche generali, ma non riaprono la BFS HTML:
 quando sono linkati da una pagina al limite possono comparire a
 `depth = max_depth + 1`.
+
+Per ripartire davvero da zero usa `make clean`: il target elimina raw HTML/PDF,
+frontier e checkpoint della discovery, manifest, Markdown prodotti, stats
+correnti e storico sotto `data/processed/runs/`. Dopo questo reset i filtri
+incrementali non vedono più successi precedenti.
 
 I PDF linkati dagli HTML vengono registrati subito in
 `discovered_urls.jsonl`.
@@ -233,14 +262,18 @@ solo se rientra in uno di questi casi:
    `linee-guida`, `manifesto`, `piano-di-studi`;
 2. materiale didattico operativo da `didattica`, come `calendario`, `schedule`,
    `ofa`, `requirements`;
-3. materiale internazionale da `international`, come `accordi` ed `erasmus`;
-4. documenti di qualità ed esiti del corso, come `SUA-CDS` e `AlmaLaurea`,
+3. solo per i PDF con keyword `calendario`, una deroga rescue ancora più stretta
+   quando il parent DIEM è una pagina di dettaglio informativa con slug esplicito
+   come `calendario-prove-in-itinere` o `appelli-di-recupero`;
+4. materiale internazionale da `international`, come `accordi` ed `erasmus`;
+5. documenti di qualità ed esiti del corso, come `SUA-CDS` e `AlmaLaurea`,
    quando sono linkati da corsi già ammessi nello scope;
-5. documento principale di opportunità da `home_bandi`, riconosciuto da segnali
+6. documento principale di opportunità da `home_bandi`, riconosciuto da segnali
    come `bando`, `call`, `premio`, `borsa`, `concorso`, ma non se è solo un
    allegato accessorio come `graduatoria`, `domanda`, `modello`, `locandina`,
-   `faq`, `presentazione`, `comunicato`, `avviso-proroga`;
-6. `decreto` proveniente da una sezione centrale e accompagnato da un contesto
+   `faq`, `verbale`, `differimento`, `elenco`, `scorrimento`, `presentazione`,
+   `comunicato`, `avviso-proroga`;
+7. `decreto` proveniente da una sezione centrale e accompagnato da un contesto
    testuale non generico.
 
 Questo include anche le pagine `corsi.unisa.it` già ammesse dallo scope, quando
@@ -289,9 +322,31 @@ Responsabilità:
 - aggiunge record a `data/processed/manifest.jsonl`;
 - salta PDF già processati negli ultimi 7 giorni.
 
-Il download dei PDF usa una cadenza più prudente della discovery HTML: un solo
-download alla volta, con una breve pausa tra richieste, perché i file sono più
-pesanti e non serve generare burst.
+La fase PDF usa una pipeline sovrapposta:
+
+- scarica più PDF in parallelo rispettando `pdf_max_concurrent_downloads` per
+  dominio e `pdf_download_delay_seconds`;
+- avvia l'estrazione appena un raw valido è disponibile, senza aspettare la fine
+  di tutti i download;
+- riusa i raw PDF già presenti e validi quando `pdf_force_reextract=false`;
+- salva i PDF con scrittura atomica, valida redirect finali, MIME e signature
+  PDF, e isola gli errori per singolo documento.
+
+Durante il run mostra una barra `Estrazione PDF` sul lavoro effettivamente
+selezionato. Il contatore avanza quando ogni PDF raggiunge uno stato terminale e
+il postfix espone pronti per l'estrazione, successi, fallimenti, file troppo
+grandi, download di rete e raw riusati.
+
+I parametri effettivi della fase sono configurabili in `config.yaml`:
+`pdf_max_bytes`, `pdf_extraction_workers`, `pdf_max_concurrent_downloads`,
+`pdf_download_delay_seconds`, `pdf_skip_recent_days`, `pdf_force_reextract` e
+`pdf_extraction`.
+
+Nel blocco `extraction.pdf` degli stats vengono riportati anche i parametri
+operativi del run: PDF pronti per l'estrazione, raw riusati, download di rete,
+byte scaricati, tempi di download/estrazione, throughput PDF/minuto, backend
+dell'executor e breakdown dei fallimenti. In questo modo una run lenta distingue
+chiaramente rete, parsing e documenti corrotti.
 
 Nel report `discovery.pdfs` i nomi sono intenzionalmente espliciti:
 
@@ -304,6 +359,9 @@ Nel report `discovery.pdfs` i nomi sono intenzionalmente espliciti:
 - `pdfs_allowed_by_policy_by_section` /
   `pdfs_allowed_by_policy_by_keyword`: da dove arrivano e perché sono stati
   ammessi;
+- `allowed_suspicious_attachments`: ammessi da ricontrollare se in futuro una
+  regola lascia passare PDF `home_bandi` che conservano hint da allegato
+  accessorio;
 - `blocked_review_candidates`: PDF ancora bloccati che meritano attenzione
   perché mostrano segnali documentali espliciti, come documento stabile,
   materiale didattico operativo, programma internazionale, evidenza del corso

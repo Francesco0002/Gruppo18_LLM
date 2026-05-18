@@ -14,6 +14,7 @@ url_filters.py.
 from __future__ import annotations
 
 import asyncio
+import time
 import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
@@ -54,6 +55,27 @@ class DomainRateLimiter:
                     await asyncio.sleep(wait_time)
 
             self.last_request[domain] = asyncio.get_running_loop().time()
+
+
+class SyncDomainRateLimiter:
+    """Versione sincrona usata dai download PDF compatibili con codice legacy."""
+
+    def __init__(self, requests_per_second: float) -> None:
+        self.delay = 1 / requests_per_second
+        self.last_request: dict[str, float] = {}
+
+    def wait(self, domain: str) -> None:
+        """Rispetta il delay configurato per il dominio nel flusso sincrono."""
+        # Questa variante resta volutamente minimale: serve alla API sincrona
+        # mantenuta per compatibilita e ai test di regressione, mentre la
+        # pipeline reale usa il limiter asincrono con semafori per dominio.
+        now = time.monotonic()
+        last = self.last_request.get(domain)
+        if last is not None:
+            wait_time = self.delay - (now - last)
+            if wait_time > 0:
+                time.sleep(wait_time)
+        self.last_request[domain] = time.monotonic()
 
 
 class RobotsCache:

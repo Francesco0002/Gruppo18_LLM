@@ -6,7 +6,7 @@ Input:
 - data/raw_html/<sh>/<hash>.html
 
 Output:
-- data/processed/raw_markdown/<sh>/<hash>.md
+- data/processed/markdown_raw/<sh>/<hash>.md
 - data/processed/markdown/<sh>/<hash>.md
 - data/processed/manifest.jsonl
 """
@@ -55,7 +55,7 @@ SKIP_RECENT_DAYS = 7
 
 def raw_markdown_path(url_hash: str, config: dict) -> Path:
     """Path del Markdown raw generato dallo scraper."""
-    base = project_path(config["paths"].get("processed_raw_markdown_dir", "data/processed/raw_markdown"))
+    base = project_path(config["paths"].get("processed_raw_markdown_dir", "data/processed/markdown_raw"))
     return base / url_hash[:2] / f"{url_hash}.md"
 
 
