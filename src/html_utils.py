@@ -4,7 +4,8 @@ Utility HTML usate dalla discovery.
 Responsabilità:
 - risolvere href relativi secondo le convenzioni UNISA;
 - leggere il canonical da una BeautifulSoup già disponibile;
-- estrarre link attraversabili da una pagina HTML.
+- estrarre link attraversabili da una pagina HTML usando il contesto di scope
+  corrente, inclusa la whitelist docente.
 
 La decisione se un URL sia nello scope resta in url_filters.py.
 """
@@ -39,10 +40,24 @@ def extract_canonical_from_soup(soup: BeautifulSoup, fallback_url: str) -> str:
     return normalize_url(fallback_url)
 
 
-def extract_links_from_soup(soup: BeautifulSoup, base_url: str, config: dict) -> list[str]:
-    """Estrae link traversabili da una pagina HTML."""
-    links: list[str] = []
-    context = {"discovered_from": base_url}
+def extract_link_entries_from_soup(
+    soup: BeautifulSoup,
+    base_url: str,
+    config: dict,
+    allowed_teacher_profiles: set[str] | None = None,
+    authorized_directory_bridge: bool = False,
+) -> list[dict[str, str]]:
+    """Estrae URL traversabili mantenendo anche il testo utile del link.
+
+    Il testo del link serve soprattutto per classificare i PDF: molti allegati
+    hanno filename poco parlanti, ma sono descritti chiaramente nell'anchor.
+    """
+    links: dict[str, dict[str, str]] = {}
+    context = {
+        "discovered_from": base_url,
+        "allowed_teacher_profiles": allowed_teacher_profiles or set(),
+        "authorized_directory_bridge": authorized_directory_bridge,
+    }
 
     for tag in soup.find_all("a", href=True):
         absolute_url = resolve_href(base_url, tag["href"])
@@ -52,6 +67,30 @@ def extract_links_from_soup(soup: BeautifulSoup, base_url: str, config: dict) ->
         url = normalize_url(absolute_url)
         ok, _ = can_traverse_url(url, config, context)
         if ok:
-            links.append(url)
+            label_parts = [tag.get_text(" ", strip=True), str(tag.get("title", "")).strip()]
+            links[url] = {
+                "url": url,
+                "text": " ".join(part for part in label_parts if part),
+            }
 
-    return list(dict.fromkeys(links))
+    return list(links.values())
+
+
+def extract_links_from_soup(
+    soup: BeautifulSoup,
+    base_url: str,
+    config: dict,
+    allowed_teacher_profiles: set[str] | None = None,
+    authorized_directory_bridge: bool = False,
+) -> list[str]:
+    """Compatibilità comoda quando serve soltanto la lista degli URL."""
+    return [
+        entry["url"]
+        for entry in extract_link_entries_from_soup(
+            soup,
+            base_url,
+            config,
+            allowed_teacher_profiles,
+            authorized_directory_bridge,
+        )
+    ]

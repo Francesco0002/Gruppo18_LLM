@@ -54,6 +54,11 @@ class DiscoveryRecord(TypedDict, total=False):
     index_skip_reason: str | None
     discovery_method: str
     error: str
+    link_text: str
+    pdf_source_section: str
+    pdf_download_decision: str
+    pdf_match_keywords: list[str]
+    robots_txt_denied: bool
 
 
 class MarkdownQuality(TypedDict, total=False):

@@ -12,6 +12,8 @@ Questo script orchestra il primo step della pipeline:
 8. espone metriche per depth utili a capire se la frontiera si sta esaurendo
    tra run successive con budget limitato
 9. conserva le pagine HTML di bordo da riespandere quando aumenta max_depth
+10. mantiene una whitelist persistente dei profili docente DIEM autorizzati
+11. rinvia gli URL bloccati dal limite di dominio invece di perderli
 
 La logica di processing del singolo URL vive in discovery_processor.py.
 """
@@ -45,11 +47,24 @@ from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState, Pr
 from discovery_processor import filter_context, process_item
 from pipeline_io import now_iso
 from url_filters import can_traverse_url, is_pdf_url
+from url_filters import (
+    is_diem_personnel_url,
+    is_directory_person_url,
+    teacher_profile_key,
+)
 
 
-def count_items_by_depth(items: list[CrawlItem] | deque[CrawlItem]) -> dict[str, int]:
-    """Conta la frontiera BFS per depth, così il report può seguirne lo svuotamento."""
-    counts = Counter(item.depth for item in items)
+def count_items_by_depth(
+    items: list[CrawlItem] | deque[CrawlItem],
+    *,
+    force_revisit: bool | None = None,
+) -> dict[str, int]:
+    """Conta item BFS per depth, con filtro opzionale sulle riespansioni."""
+    counts = Counter(
+        item.depth
+        for item in items
+        if force_revisit is None or item.force_revisit is force_revisit
+    )
     return {str(depth): counts[depth] for depth in sorted(counts)}
 
 
@@ -147,6 +162,7 @@ def create_initial_state(
         domain_counts=Counter(),
         known_urls=dict(persistent_state.known_urls),
         known_documents=dict(persistent_state.known_documents),
+        allowed_teacher_profiles=set(persistent_state.allowed_teacher_profiles),
         expansion_backlog={item.url: item for item in persistent_state.expansion_backlog},
     )
 
@@ -193,7 +209,11 @@ def visit_skip_reason(
     ):
         return "recently_known"
 
-    ok, _ = can_traverse_url(item.url, config, filter_context(item.discovered_from))
+    ok, _ = can_traverse_url(
+        item.url,
+        config,
+        filter_context(item.discovered_from, state.allowed_teacher_profiles),
+    )
     if not ok:
         return "out_of_scope"
 
@@ -227,15 +247,23 @@ def take_batch(
     reference_time: datetime | None = None,
     visited_at: str | None = None,
     skip_counts: Counter[str] | None = None,
+    skip_counts_by_depth: Counter[tuple[str, int]] | None = None,
 ) -> list[CrawlItem]:
-    """Prende dalla coda un batch di URL validi da scaricare."""
+    """Prende dalla coda un batch di URL validi senza perdere lavoro rinviabile."""
     batch: list[CrawlItem] = []
     batch_size = config["crawler"]["max_concurrent_requests"]
-
     max_total_urls = config["crawler"]["max_total_urls"]
+    items_to_scan = len(state.queue)
+    deferred_items: list[CrawlItem] = []
 
-    while state.queue and len(batch) < batch_size and len(state.visited) < max_total_urls:
+    while (
+        state.queue
+        and items_to_scan > 0
+        and len(batch) < batch_size
+        and len(state.visited) < max_total_urls
+    ):
         item = state.queue.popleft()
+        items_to_scan -= 1
         # queued rappresenta solo gli URL ancora presenti nella coda BFS.
         state.queued.discard(item.url)
 
@@ -243,11 +271,19 @@ def take_batch(
         if skip_reason is not None:
             if skip_counts is not None:
                 skip_counts[skip_reason] += 1
+            if skip_counts_by_depth is not None:
+                skip_counts_by_depth[(skip_reason, item.depth)] += 1
+            if skip_reason == "domain_limit":
+                # Il limite di dominio è un blocco del run corrente, non prova
+                # che l'URL sia stato visitato: va riprovato in run future.
+                deferred_items.append(item)
+                state.queued.add(item.url)
             continue
 
         mark_visited(state, item.url, visited_at)
         batch.append(item)
 
+    state.queue.extend(deferred_items)
     return batch
 
 
@@ -295,6 +331,16 @@ def enqueue_links(
         return False
 
     for link in links:
+        profile = teacher_profile_key(link, config)
+        if profile and (
+            is_diem_personnel_url(parent.url, config)
+            or (
+                is_directory_person_url(parent.url, config)
+                and is_diem_personnel_url(parent.discovered_from, config)
+            )
+        ):
+            state.allowed_teacher_profiles.add(profile)
+
         if link in state.visited or link in state.queued:
             continue
         if link in state.known_urls and not is_due_for_refresh(state.known_urls[link], config):
@@ -380,11 +426,15 @@ async def run_discovery(config: dict) -> dict:
     status_counts: Counter[str] = Counter()
     type_counts: Counter[str] = Counter()
     skip_counts: Counter[str] = Counter()
+    skip_counts_by_depth: Counter[tuple[str, int]] = Counter()
     run_started_at = now_iso()
     reference_time = datetime.fromisoformat(run_started_at)
     persistent_state = load_discovery_state(config)
     frontier_loaded = len(persistent_state.frontier)
-    frontier_before_by_depth = count_items_by_depth(persistent_state.frontier)
+    frontier_before_by_depth = count_items_by_depth(
+        persistent_state.frontier,
+        force_revisit=False,
+    )
     expansion_backlog_before_by_depth = count_items_by_depth(persistent_state.expansion_backlog)
     reexpansion_loaded = len(
         eligible_reexpansion_items(persistent_state, config["crawler"]["max_depth"])
@@ -419,13 +469,28 @@ async def run_discovery(config: dict) -> dict:
             dynamic_ncols=True,
         ) as progress:
             while state.queue and len(state.visited) < max_total_urls:
-                batch = take_batch(state, config, reference_time, run_started_at, skip_counts)
+                batch = take_batch(
+                    state,
+                    config,
+                    reference_time,
+                    run_started_at,
+                    skip_counts,
+                    skip_counts_by_depth,
+                )
                 if not batch:
                     exhausted_without_batch = True
                     break
 
                 tasks = [
-                    process_item(item, client, limiter, robots, config, state.seen_documents)
+                    process_item(
+                        item,
+                        client,
+                        limiter,
+                        robots,
+                        config,
+                        state.seen_documents,
+                        state.allowed_teacher_profiles,
+                    )
                     for item in batch
                 ]
                 results = await asyncio.gather(*tasks)
@@ -516,10 +581,25 @@ async def run_discovery(config: dict) -> dict:
         "by_status": dict(status_counts),
         "by_type": dict(type_counts),
         "skipped_by_reason": dict(skip_counts),
+        "skipped_by_reason_by_depth": {
+            reason: {
+                str(depth): count
+                for (skip_reason, depth), count in sorted(skip_counts_by_depth.items())
+                if skip_reason == reason
+            }
+            for reason in sorted({reason for reason, _ in skip_counts_by_depth})
+        },
         "frontier_loaded": frontier_loaded,
         "frontier_remaining": len(state.queue),
         "frontier_before_by_depth": frontier_before_by_depth,
-        "frontier_after_by_depth": count_items_by_depth(state.queue),
+        "frontier_after_by_depth": count_items_by_depth(
+            state.queue,
+            force_revisit=False,
+        ),
+        "reexpansion_frontier_after_by_depth": count_items_by_depth(
+            state.queue,
+            force_revisit=True,
+        ),
         "reexpansion_loaded": reexpansion_loaded,
         "expansion_backlog_before_by_depth": expansion_backlog_before_by_depth,
         "expansion_backlog_after_by_depth": count_items_by_depth(
@@ -528,6 +608,7 @@ async def run_discovery(config: dict) -> dict:
         "processed_html_by_depth": count_recorded_html_by_depth(output_file),
         "known_urls": len(state.known_urls),
         "known_documents": len(state.known_documents),
+        "allowed_teacher_profiles": len(state.allowed_teacher_profiles),
         "stop_reason": stop_reason,
         "output_file": config["paths"]["discovered_urls_file"],
         "raw_html_dir": config["paths"]["raw_html_dir"],

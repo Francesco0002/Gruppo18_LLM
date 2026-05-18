@@ -5,8 +5,11 @@ https://www.diem.unisa.it/didattica
 https://www.diem.unisa.it/ricerca
 https://www.diem.unisa.it/terza-missione
 https://www.diem.unisa.it/international
-
+https://www.diem.unisa.it/home/news
+https://www.diem.unisa.it/home/eventi
+https://www.diem.unisa.it/home/bandi
 # Pagine utili per recuperare docenti e corsi
 https://www.diem.unisa.it/dipartimento/personale
 https://www.diem.unisa.it/didattica/offerta-formativa
 https://www.diem.unisa.it/dipartimento/strutture
+https://www.diem.unisa.it/home/contatti

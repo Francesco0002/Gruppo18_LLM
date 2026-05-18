@@ -3,18 +3,21 @@ Filtri URL per la discovery.
 
 Le regole riflettono lo scope dell'assignment:
 - pagine sotto www.diem.unisa.it;
-- profili docenti DIEM sotto docenti.unisa.it, raggiunti da pagine in scope;
+- profili docenti DIEM sotto docenti.unisa.it, autorizzati dal personale DIEM;
 - corsi DIEM sotto corsi.unisa.it, riconosciuti da percorsi/codici in config;
 - PDF referenziati da pagine in scope.
+- query parametriche bloccate di default, con allowlist puntuali per archivi
+  informativi verificati.
 
 Tabella delle regole principali:
 
 | Dominio / risorsa     | Regola                                                     |
 |-----------------------|------------------------------------------------------------|
 | www.diem.unisa.it     | Ammesso.                                                   |
-| docenti.unisa.it      | Solo se scoperto da DIEM o da un profilo docente in scope. |
+| docenti.unisa.it      | Solo profili whitelistati dal personale DIEM.              |
 | corsi.unisa.it        | Solo percorsi/codici DIEM configurati.                     |
 | uploads PDF           | Rilevati; scaricati solo se robots.txt lo permette.        |
+| query `archive`        | Solo valori allowlistati per news/eventi DIEM.              |
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from urllib.parse import parse_qsl, urlencode, urldefrag, urlparse
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_PARAMS = {"fbclid", "gclid", "msclkid"}
+# Query bloccate di default: spesso generano filtri, viste tecniche o duplicati.
 BLOCKED_QUERY_PARAMS = {
     "archive",
     "category",
@@ -35,9 +39,19 @@ BLOCKED_QUERY_PARAMS = {
     "sitemap",
     "stato",
 }
+# Eccezioni locali: alcuni parametri sono rumore solo su path specifici.
 BLOCKED_QUERY_BY_PATH = {
     "/ricerca/focus": {"anno", "id"},
     "/ricerca/progetti-finanziati": {"tip"},
+}
+# Allowlist stretta per archivi che aggiungono pagine informative reali.
+ALLOWED_QUERY_VALUES_BY_PATH = {
+    "/home/eventi": {"archive": {"1", "2"}},
+    "/home/news": {"archive": {"1"}},
+}
+# Parametri informativi ammessi solo dove aprono un vero dettaglio.
+ALLOWED_QUERY_PARAMS_BY_PATH = {
+    "/ricerca/progetti-finanziati": {"progetto"},
 }
 NO_INDEX_QUERY_PARAMS = {
     "page",
@@ -179,10 +193,37 @@ def has_tracking_query(url: str) -> bool:
     )
 
 
+def has_allowed_query_value(url: str, name: str) -> bool:
+    """True per query eccezionalmente utili su path esplicitamente consentiti."""
+    path = urlparse(url).path.lower().rstrip("/")
+    allowed_values = ALLOWED_QUERY_VALUES_BY_PATH.get(path, {}).get(name)
+    if not allowed_values:
+        return False
+
+    values = [
+        value
+        for param_name, value in parse_qsl(urlparse(url).query, keep_blank_values=True)
+        if param_name.lower() == name
+    ]
+    return bool(values) and all(value in allowed_values for value in values)
+
+
+def has_allowed_query_param(url: str, name: str) -> bool:
+    """True per parametri informativi consentiti solo su path specifici."""
+    path = urlparse(url).path.lower().rstrip("/")
+    return name in ALLOWED_QUERY_PARAMS_BY_PATH.get(path, set())
+
+
 def has_blocked_query(url: str) -> bool:
     """True per query tecniche che non portano contenuto utile."""
     params = query_param_names(url)
-    if params & BLOCKED_QUERY_PARAMS:
+    blocked_params = {
+        param
+        for param in params & BLOCKED_QUERY_PARAMS
+        if not has_allowed_query_value(url, param)
+        and not has_allowed_query_param(url, param)
+    }
+    if blocked_params:
         return True
 
     path = urlparse(url).path.lower().rstrip("/")
@@ -319,29 +360,70 @@ def is_known_scope_source(source_url: str | None, config: dict) -> bool:
         or (domain == course_domain and course_has_allowed_identifier(source_url, config))
     )
 
+def is_diem_personnel_url(url: str | None, config: dict) -> bool:
+    """True solo per la pagina DIEM che elenca il personale del dipartimento."""
+    if not url or not is_diem_url(url, config):
+        return False
+    return urlparse(url).path.rstrip("/").lower() == "/dipartimento/personale"
+
+
+def teacher_profile_key(url: str, config: dict) -> str | None:
+    """Identificatore stabile del profilo docente ricavato dal primo segmento."""
+    if domain_of(url) != scope_value(config, "teacher_domain", "docenti.unisa.it"):
+        return None
+    return first_path_segment(url) or None
+
+
+def allowed_teacher_profiles_from_context(context: dict | None) -> set[str]:
+    """Whitelist profili docente propagata dalla discovery ai filtri URL."""
+    if not context:
+        return set()
+    return {str(profile).lower() for profile in context.get("allowed_teacher_profiles", set())}
+
+
+def has_authorized_directory_bridge(context: dict | None) -> bool:
+    """True quando la rubrica corrente deriva dal personale DIEM."""
+    return bool(context and context.get("authorized_directory_bridge", False))
+
+
 def is_directory_link_in_scope(url: str, source_url: str | None, config: dict) -> bool:
-    """Permette la rubrica solo come ponte da pagine già in scope."""
+    """Permette la rubrica solo come ponte dalla pagina personale DIEM."""
     if not is_directory_person_url(url, config):
         return False
 
-    return is_known_scope_source(source_url, config)
+    return is_diem_personnel_url(source_url, config)
 
-def is_teacher_link_in_scope(url: str, source_url: str | None, config: dict) -> bool:
-    """Permette ingresso da DIEM e navigazione interna allo stesso profilo docente."""
+def is_teacher_link_in_scope(
+    url: str,
+    source_url: str | None,
+    config: dict,
+    context: dict | None = None,
+) -> bool:
+    """Permette solo profili docenti scoperti dal personale DIEM."""
     if not source_url:
         return False
-    if is_diem_url(source_url, config):
+
+    target_profile = teacher_profile_key(url, config)
+    if not target_profile:
+        return False
+
+    allowed_profiles = allowed_teacher_profiles_from_context(context)
+    if target_profile in allowed_profiles:
+        return True
+
+    # Primo ingresso autorizzato: il profilo viene poi registrato nella whitelist.
+    if is_diem_personnel_url(source_url, config):
         return True
     
     # Caso ponte:
     # rubrica.unisa.it/persone?matricola=... -> docenti.unisa.it/nome.cognome
-    if is_directory_person_url(source_url, config):
+    if is_directory_person_url(source_url, config) and has_authorized_directory_bridge(context):
         return True
     
     if domain_of(source_url) != scope_value(config, "teacher_domain", "docenti.unisa.it"):
         return False
     
-    return first_path_segment(source_url) == first_path_segment(url)
+    return False
 
 
 def is_pdf_in_scope(url: str, config: dict, source_url: str | None) -> bool:
@@ -390,7 +472,7 @@ def is_in_scope_url(
 
     teacher_domain = scope_value(config, "teacher_domain", "docenti.unisa.it")
     if domain == teacher_domain:
-        if is_teacher_link_in_scope(url, source_url, config):
+        if is_teacher_link_in_scope(url, source_url, config, context):
             return True, "ok"
         return False, "scope_teacher"
 

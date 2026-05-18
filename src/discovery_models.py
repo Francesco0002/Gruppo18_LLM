@@ -5,7 +5,7 @@ I modelli tengono separati i contratti dati dalla logica:
 - CrawlItem rappresenta un URL nella coda BFS;
 - CrawlState rappresenta lo stato persistito nel checkpoint;
 - PersistentDiscoveryState conserva anche le pagine di bordo da riespandere
-  quando una run successiva aumenta max_depth;
+  quando una run successiva aumenta max_depth e la whitelist dei docenti DIEM;
 - FetchResult rappresenta una risposta HTTP già classificata;
 - ProcessedDiscoveryItem rappresenta l'esito del processing di un URL.
 """
@@ -30,7 +30,12 @@ class CrawlItem:
 
 @dataclass
 class CrawlState:
-    """Stato salvato nel checkpoint."""
+    """Stato salvato nel checkpoint.
+
+    `allowed_teacher_profiles` contiene solo profili docenti autorizzati dal
+    personale DIEM. `expansion_backlog` conserva pagine gia viste al bordo della
+    depth corrente, da riaprire se una run successiva aumenta `max_depth`.
+    """
 
     queue: deque[CrawlItem]
     queued: set[str]
@@ -39,16 +44,22 @@ class CrawlState:
     domain_counts: Counter[str]
     known_urls: dict[str, str] = field(default_factory=dict)
     known_documents: dict[str, str] = field(default_factory=dict)
+    allowed_teacher_profiles: set[str] = field(default_factory=set)
     expansion_backlog: dict[str, CrawlItem] = field(default_factory=dict)
 
 
 @dataclass
 class PersistentDiscoveryState:
-    """Memoria della discovery condivisa tra run completati."""
+    """Memoria cumulativa condivisa tra run completati.
+
+    `frontier` è lavoro ancora da visitare; `expansion_backlog` è lavoro già
+    visitato ma utile solo per aprire depth future.
+    """
 
     frontier: deque[CrawlItem]
     known_urls: dict[str, str]
     known_documents: dict[str, str]
+    allowed_teacher_profiles: set[str] = field(default_factory=set)
     expansion_backlog: deque[CrawlItem] = field(default_factory=deque)
 
 

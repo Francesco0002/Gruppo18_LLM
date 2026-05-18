@@ -7,7 +7,8 @@ Responsabilità:
 - leggere seed URL;
 - creare record per discovered_urls.jsonl;
 - salvare HTML grezzo, checkpoint BFS e backlog delle pagine di bordo da
-  riespandere quando aumenta max_depth.
+  riespandere quando aumenta max_depth;
+- persistere la whitelist dei profili docente DIEM tra run e resume.
 
 Questo modulo non effettua richieste HTTP e non processa HTML.
 """
@@ -242,16 +243,23 @@ def save_checkpoint(
 ) -> None:
     """Salva lo stato del crawl per poter riprendere in caso di interruzione."""
     persistent_state = persistent_state or empty_persistent_state()
+    # Il checkpoint salva solo il delta rispetto allo stato persistito: così non
+    # duplica ad ogni run l'intera memoria cumulativa del crawler.
     new_known_urls = {
         url: timestamp
         for url, timestamp in state.known_urls.items()
         if persistent_state.known_urls.get(url) != timestamp
     }
+    # Documenti canonici già incontrati nella run corrente; servono a non
+    # riscrivere come nuovi URL che puntano allo stesso contenuto noto.
     new_known_documents = {
         url: timestamp
         for url, timestamp in state.known_documents.items()
         if persistent_state.known_documents.get(url) != timestamp
     }
+    new_allowed_teacher_profiles = sorted(
+        state.allowed_teacher_profiles - persistent_state.allowed_teacher_profiles
+    )
     checkpoint = {
         "status": status,
         "queue": [asdict(item) for item in state.queue],
@@ -261,6 +269,7 @@ def save_checkpoint(
         "domain_counts": dict(state.domain_counts),
         "new_known_urls": new_known_urls,
         "new_known_documents": new_known_documents,
+        "new_allowed_teacher_profiles": new_allowed_teacher_profiles,
         "expansion_backlog": [
             asdict(item)
             for item in sorted(
@@ -305,11 +314,19 @@ def load_checkpoint(
     queued = {item.url for item in queue}
 
     persistent_state = persistent_state or empty_persistent_state()
-    if "new_known_urls" in data or "new_known_documents" in data:
+    if (
+        "new_known_urls" in data
+        or "new_known_documents" in data
+        or "new_allowed_teacher_profiles" in data
+    ):
         known_urls = {**persistent_state.known_urls, **dict(data.get("new_known_urls", {}))}
         known_documents = {
             **persistent_state.known_documents,
             **dict(data.get("new_known_documents", {})),
+        }
+        allowed_teacher_profiles = {
+            *persistent_state.allowed_teacher_profiles,
+            *data.get("new_allowed_teacher_profiles", []),
         }
     else:
         # Compatibilità con i checkpoint precedenti che salvavano la copia completa.
@@ -317,6 +334,10 @@ def load_checkpoint(
         known_documents = {
             **persistent_state.known_documents,
             **dict(data.get("known_documents", {})),
+        }
+        allowed_teacher_profiles = {
+            *persistent_state.allowed_teacher_profiles,
+            *data.get("allowed_teacher_profiles", []),
         }
 
     raw_backlog = data.get("expansion_backlog")
@@ -337,6 +358,7 @@ def load_checkpoint(
         domain_counts=Counter(data.get("domain_counts", {})),
         known_urls=known_urls,
         known_documents=known_documents,
+        allowed_teacher_profiles=allowed_teacher_profiles,
         expansion_backlog={item.url: item for item in backlog_items},
     )
 
@@ -347,6 +369,7 @@ def empty_persistent_state() -> PersistentDiscoveryState:
         frontier=deque(),
         known_urls={},
         known_documents={},
+        allowed_teacher_profiles=set(),
         expansion_backlog=deque(),
     )
 
@@ -371,6 +394,7 @@ def load_discovery_state(config: dict) -> PersistentDiscoveryState:
         frontier=frontier,
         known_urls=dict(data.get("known_urls", {})),
         known_documents=dict(data.get("known_documents", {})),
+        allowed_teacher_profiles=set(data.get("allowed_teacher_profiles", [])),
         expansion_backlog=expansion_backlog,
     )
 
@@ -381,6 +405,7 @@ def save_discovery_state(state: CrawlState, config: dict) -> None:
         "frontier": [asdict(item) for item in state.queue],
         "known_urls": state.known_urls,
         "known_documents": state.known_documents,
+        "allowed_teacher_profiles": sorted(state.allowed_teacher_profiles),
         "expansion_backlog": [
             asdict(item)
             for item in sorted(

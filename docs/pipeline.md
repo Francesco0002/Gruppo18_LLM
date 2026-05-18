@@ -94,11 +94,43 @@ riaccodate con una **riespansione mirata**: il crawler le rilegge per aprire il
 nuovo livello, senza dover fare `make clean` e senza attendere
 `refresh_after_days`.
 
-In breve:
+### Concetti da ricordare
 
-- `frontier` = URL ancora da visitare;
-- `expansion_backlog` = pagine già visitate, ma da riaprire se vuoi esplorare
-  una depth più profonda.
+- `frontier`: URL già scoperti ma non ancora visitati.
+- `espansione`: visita di una pagina HTML e lettura dei suoi link.
+- `expansion_backlog`: pagine già visitate che non potevano ancora essere
+  espanse perché la run si fermava alla depth corrente.
+- `reexpansion`: nuova visita di quelle pagine quando aumenti `max_depth`, così
+  possono generare i figli del livello successivo.
+
+Servono a distinguere due situazioni diverse:
+
+- manca ancora lavoro **dentro** una depth;
+- la depth è già stata visitata, ma va riaperta per scoprire la depth dopo.
+
+Per i docenti, la discovery mantiene anche `allowed_teacher_profiles`: la
+whitelist dei profili `docenti.unisa.it` autorizzati. Un profilo entra in questa
+lista solo se viene scoperto dalla pagina `dipartimento/personale` o dal ponte
+`rubrica.unisa.it/persone?...` raggiunto da quella pagina. Dopo l'ingresso, il
+crawler può navigare solo le sottopagine dello stesso profilo; link verso altri
+docenti non autorizzati restano fuori scope.
+
+Le query tecniche restano bloccate di default. L'unica eccezione per `archive`
+è una allowlist esplicita di pagine informative:
+
+- `/home/eventi?archive=1`
+- `/home/eventi?archive=2`
+- `/home/news?archive=1`
+
+In questo modo gli archivi utili entrano nel corpus senza rendere attraversabile
+qualunque variante parametrica del sito.
+
+Sui progetti finanziati la regola è più selettiva:
+
+- `/ricerca/progetti-finanziati?progetto=...` è attraversabile perché apre il
+  dettaglio informativo di un singolo progetto;
+- `tip` e `stato` restano bloccati perché producono viste filtrate della stessa
+  lista, utili alla navigazione ma ridondanti per il corpus RAG.
 
 Il checkpoint usa `status="in_progress"` durante il run e
 `status="completed"` a chiusura. Solo il checkpoint finale riporta anche
@@ -109,7 +141,9 @@ esaurita (`queue_exhausted`) e coda senza URL più eleggibili
 Quando una run non ha URL eleggibili, le statistiche della discovery riportano
 anche `skipped_by_reason`: ad esempio `recently_known` segnala URL già noti e
 ancora dentro la finestra `refresh_after_days`, quindi esclusi senza fetch nella
-run corrente.
+run corrente. Gli URL bloccati da `domain_limit`, invece, non vengono più
+eliminati dalla frontiera: il limite vale per il run corrente, quindi quegli URL
+restano pendenti e potranno essere visitati in una run successiva.
 
 Anche nella costruzione iniziale della coda, seed e sitemap già noti e ancora
 recenti non vengono riaccodati inutilmente se non sono dovuti al refresh. In
@@ -117,17 +151,44 @@ questo modo una run che riprende da frontier o da `expansion_backlog` non si
 porta dietro seed superflui a depth 0 che renderebbero meno leggibile il report
 di copertura.
 
-Le statistiche in `data/processed/stats.json` includono anche
-`discovery.coverage`, che misura la copertura cumulativa della BFS per singola
-depth fino a `max_depth`. Per ogni livello espone:
+Le statistiche in `data/processed/stats.json` sono organizzate in pochi blocchi:
 
-- `pending_at_depth`: URL di quella depth già scoperti ma non ancora visitati;
-- `pending_reexpansion_at_depth`: pagine già visitate a quella depth che devono
-  ancora essere riespanse per aprire il livello successivo;
-- `pending_below_depth`: lavoro ancora aperto nelle depth inferiori;
-- `sealed`: `true` solo quando le depth inferiori non possono più produrre nuovi
-  URL per quel livello;
-- `complete`: `true` solo quando quel livello è davvero esaurito.
+- `discovery.run`: cosa è successo nella discovery del run corrente;
+- `discovery.found`: quali URL sono stati trovati nel run, per status, tipo e
+  dominio;
+- `discovery.run_progress`: confronto essenziale tra frontiera prima e dopo il
+  run;
+- `discovery.remaining_work`: lavoro ancora aperto dopo il run;
+- `discovery.coverage`: verdetto di copertura e tabella per depth;
+- `discovery.pdfs`: riepilogo dei PDF trovati, bloccati o ammessi dalla regola
+  dedicata;
+- `extraction`: esito dello scraping HTML e dell'estrazione PDF nel solo run
+  corrente;
+- `processed`: stato cumulativo del corpus già processato.
+
+La tabella `discovery.coverage.depths` concentra in un solo punto le metriche più
+utili per ogni livello:
+
+- `found_in_run`: URL trovati a quella depth nel run corrente;
+- `visited_html_in_run`: pagine HTML realmente visitate a quella depth;
+- `pending_new`: URL nuovi ancora da visitare;
+- `pending_reexpansion`: pagine già viste da riespandere per aprire il livello
+  successivo;
+- `pending_from_lower_depths`: lavoro nelle depth inferiori che può ancora
+  generare figli qui;
+- `complete`: nessun nuovo URL resta da visitare a quella depth;
+- `visited_complete`: la depth è stata visitata davvero fino in fondo.
+
+`discovery.remaining_work` mantiene solo il riepilogo necessario:
+
+- `new_urls` / `new_urls_by_depth`: URL nuovi ancora da visitare;
+- `reexpansions` / `reexpansions_by_depth`: riespansioni ancora pendenti;
+- `future_expansion_backlog_by_depth`: pagine già viste che diventeranno utili
+  solo se aumenterai ancora `max_depth`.
+
+`failed_by_kind` distingue i fallimenti tra `http_404`, `timeout`, `http_5xx`,
+altri errori HTTP e altri casi. `blocking_reasons` spiega perché il verdetto
+generale non è ancora `complete`.
 
 Una depth è completa solo quando:
 
@@ -136,30 +197,56 @@ Una depth è completa solo quando:
 3. non restano pagine da riespandere che potrebbero generare nuovi figli.
 
 Il verdetto globale è `complete` solo se tutte le depth configurate soddisfano
-queste condizioni e la run termina con `queue_exhausted`.
+queste condizioni, risultano anche `visited_complete` e la run termina con
+`queue_exhausted`.
 
-Lo storico di ciascuna run conserva anche `frontier_before_by_depth`,
-`frontier_after_by_depth`, `expansion_backlog_before_by_depth`,
-`expansion_backlog_after_by_depth` e `processed_html_by_depth`, così run
-successive mostrano sia se una frontiera si sta svuotando sia quando una nuova
-depth viene aperta tramite riespansione.
+### Come leggere l'andamento tra run
 
-Per leggere l'andamento di una run:
+Ogni report storico sotto `data/processed/runs/<run_id>/stats.json` conserva il
+riepilogo compatto del run. Per capire se stai davvero chiudendo una depth:
 
-- se `frontier_after_by_depth["2"]` resta alto, ci sono ancora URL di depth 2 da
-  visitare;
-- se `expansion_backlog_after_by_depth["1"]` è maggiore di zero, le pagine di
-  depth 1 sono state visitate ma aspettano una run con `max_depth >= 2` per
-  generare figli;
-- se entrambi arrivano a zero e `coverage.depths[2].complete` è `true`, allora
-  la depth 2 è stata davvero coperta rispetto alle regole del crawler.
+- confronta `discovery.run_progress.new_urls_before_by_depth` con
+  `new_urls_after_by_depth`;
+- guarda in `discovery.coverage.depths` se `pending_new` sta scendendo;
+- controlla `pending_reexpansion` se hai appena aumentato `max_depth`;
+- usa `future_expansion_backlog_by_depth` per sapere quanto lavoro si attiverà
+  soltanto quando andrai ancora più in profondità;
+- considera una depth davvero chiusa quando `complete` e `visited_complete`
+  sono entrambi `true`.
 I PDF restano inclusi nelle statistiche generali, ma non riaprono la BFS HTML:
 quando sono linkati da una pagina al limite possono comparire a
 `depth = max_depth + 1`.
 
 I PDF linkati dagli HTML vengono registrati subito in
-`discovered_urls.jsonl`. Se `robots.txt` consente il download, ricevono
-`status="pending_download"`; altrimenti ricevono `status="robots_denied"`.
+`discovered_urls.jsonl`.
+
+La regola ordinaria resta semplice: se `robots.txt` consente il download, il
+PDF riceve `status="pending_download"`; altrimenti riceve
+`status="robots_denied"`.
+
+Esistono però deroghe PDF dedicate e volutamente strette per non perdere
+documenti utili alla RAG. Un PDF bloccato da `robots.txt` viene comunque ammesso
+solo se rientra in uno di questi casi:
+
+1. documento stabile da sezione centrale (`didattica`, `dipartimento`,
+   `ricerca`, `international`) con keyword come `regolamento`, `guida`,
+   `linee-guida`, `manifesto`, `piano-di-studi`;
+2. materiale didattico operativo da `didattica`, come `calendario`, `schedule`,
+   `ofa`, `requirements`;
+3. materiale internazionale da `international`, come `accordi` ed `erasmus`;
+4. documenti di qualità ed esiti del corso, come `SUA-CDS` e `AlmaLaurea`,
+   quando sono linkati da corsi già ammessi nello scope;
+5. documento principale di opportunità da `home_bandi`, riconosciuto da segnali
+   come `bando`, `call`, `premio`, `borsa`, `concorso`, ma non se è solo un
+   allegato accessorio come `graduatoria`, `domanda`, `modello`, `locandina`,
+   `faq`, `presentazione`, `comunicato`, `avviso-proroga`;
+6. `decreto` proveniente da una sezione centrale e accompagnato da un contesto
+   testuale non generico.
+
+Questo include anche le pagine `corsi.unisa.it` già ammesse dallo scope, quando
+appartengono a sezioni centrali come `didattica`. In questo modo la pipeline non
+perde le opportunità correnti davvero interrogabili dal chatbot, ma continua a
+evitare di scaricare in massa risultati, moduli e allegati debolmente utili.
 
 ## 2. Scraping HTML
 
@@ -174,7 +261,7 @@ Responsabilità:
 - legge gli HTML `status="ok"` e `indexable=true` da `discovered_urls.jsonl`;
 - legge il file HTML grezzo già salvato, senza riscaricare la pagina;
 - genera Markdown raw con Crawl4AI;
-- salva il raw in `data/processed/raw_markdown/<sh>/<hash>.md`;
+- salva il raw in `data/processed/markdown_raw/<sh>/<hash>.md`;
 - pulisce boilerplate conservativo e aggiunge front matter YAML;
 - salva il Markdown indicizzabile in `data/processed/markdown/<sh>/<hash>.md`;
 - aggiunge record a `data/processed/manifest.jsonl`;
@@ -193,14 +280,42 @@ Responsabilità:
 - legge PDF `status="pending_download"` da `discovered_urls.jsonl`;
 - scarica i PDF in `data/raw_pdf/<sh>/<hash>.pdf`;
 - converte i PDF in Markdown raw con `pymupdf4llm`;
-- salva il raw in `data/processed/raw_markdown/<sh>/<hash>.md`;
+- salva il raw in `data/processed/markdown_raw/<sh>/<hash>.md`;
 - normalizza artefatti PDF evidenti e aggiunge front matter YAML;
+- riconosce i PDF tabellari solo apparentemente pieni, ma privi di vere righe
+  dati, e li conserva nel manifest con `text_extracted=false`,
+  `indexable=false` e warning `empty_structured_pdf`;
 - salva il Markdown indicizzabile in `data/processed/markdown/<sh>/<hash>.md`;
 - aggiunge record a `data/processed/manifest.jsonl`;
 - salta PDF già processati negli ultimi 7 giorni.
 
-I PDF `robots_denied` restano tracciati in `discovered_urls.jsonl`, ma non
-vengono scaricati.
+Il download dei PDF usa una cadenza più prudente della discovery HTML: un solo
+download alla volta, con una breve pausa tra richieste, perché i file sono più
+pesanti e non serve generare burst.
+
+Nel report `discovery.pdfs` i nomi sono intenzionalmente espliciti:
+
+- `pdfs_found`: PDF trovati;
+- `pdfs_blocked_by_robots`: record PDF ancora bloccati;
+- `unique_pdfs_blocked_by_robots`: PDF unici ancora bloccati;
+- `blocked_by_robots_by_section` / `blocked_by_robots_by_keyword`: dove si
+  concentra la perdita di copertura;
+- `pdfs_allowed_by_policy`: PDF unici ammessi dalle deroghe dedicate;
+- `pdfs_allowed_by_policy_by_section` /
+  `pdfs_allowed_by_policy_by_keyword`: da dove arrivano e perché sono stati
+  ammessi;
+- `blocked_review_candidates`: PDF ancora bloccati che meritano attenzione
+  perché mostrano segnali documentali espliciti, come documento stabile,
+  materiale didattico operativo, programma internazionale, evidenza del corso
+  o opportunità principale;
+- `blocked_intentionally_excluded`: PDF che la policy lascia fuori di proposito,
+  ad esempio perché arrivano da `home_bandi` o sono solo `bando`,
+  `graduatoria`, `decreto`;
+- `blocked_other`: PDF bloccati che non ricadono in nessuna delle due categorie
+  precedenti.
+
+I PDF `robots_denied` che non rispettano la regola dedicata restano tracciati in
+`discovered_urls.jsonl`, ma non vengono scaricati.
 
 ## 4. Ingest
 
@@ -383,7 +498,7 @@ Questa fase completa la pipeline RAG end-to-end: i chunk recuperati dal retrieva
 | `data/discovered_urls.jsonl` | Manifest della discovery URL. |
 | `data/raw_html/` | HTML grezzo indicizzabile. |
 | `data/raw_pdf/` | PDF scaricati. |
-| `data/processed/raw_markdown/` | Markdown estratto prima della pulizia. |
+| `data/processed/markdown_raw/` | Markdown estratto prima della pulizia. |
 | `data/processed/markdown/` | Markdown pulito e indicizzabile da HTML e PDF. |
 | `data/processed/manifest.jsonl` | Manifest append-only dei documenti processati. |
 | `data/processed/stats.json` | Ultime statistiche generate sullo stato corrente. |

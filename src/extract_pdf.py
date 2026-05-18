@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import time
 
 import httpx
 import pymupdf4llm
@@ -36,6 +37,9 @@ from pipeline_types import DiscoveryRecord, ProcessedRecord
 MAX_PDF_BYTES = 100 * 1024 * 1024
 PDF_WORKERS = 4
 SKIP_RECENT_DAYS = 7
+# Un solo download alla volta resta prudente per file pesanti; mezzo secondo
+# evita burst senza aggiungere minuti interi quando i PDF sono numerosi.
+PDF_DOWNLOAD_DELAY_SECONDS = 0.5
 
 
 def raw_pdf_path(url_hash: str, config: dict) -> Path:
@@ -199,7 +203,10 @@ def build_manifest_record(
     )
     output_path = markdown_path(record["hash"], config)
     markdown_output = write_text(output_path, index_markdown)
-    text_extracted = len(clean_body.strip()) >= MIN_INDEXABLE_CHARS
+    text_extracted = (
+        len(clean_body.strip()) >= MIN_INDEXABLE_CHARS
+        and "empty_structured_pdf" not in quality["clean_warnings"]
+    )
 
     manifest_record = base_manifest_record(record, "ok", crawled_at)
     manifest_record.update(
@@ -232,7 +239,11 @@ def run_extract_pdf() -> dict:
     manifest_records: list[ProcessedRecord] = []
 
     with httpx.Client(headers=headers, timeout=timeout) as client:
-        for record in records:
+        for index, record in enumerate(records):
+            if index:
+                # I PDF sono scaricati in modo volutamente più prudente della
+                # discovery HTML: sono file più pesanti e non servono burst.
+                time.sleep(PDF_DOWNLOAD_DELAY_SECONDS)
             try:
                 download = download_pdf(record, config, client)
             except httpx.HTTPError as error:
