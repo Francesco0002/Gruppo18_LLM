@@ -4,6 +4,7 @@ import argparse
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from rank_bm25 import BM25Okapi
 
@@ -40,6 +41,49 @@ def tokenize(text: str) -> list[str]:
         if token not in ITALIAN_STOPWORDS and len(token) > 1
     ]
     
+
+def get_result_url(result: RetrievalResult) -> str:
+    return str(
+        result.metadata.get("source_url")
+        or result.metadata.get("document_url")
+        or result.metadata.get("url")
+        or "unknown"
+    )
+
+
+def query_mentions_explicit_year(query: str) -> bool:
+    """
+    Riconosce se l'utente chiede esplicitamente un anno.
+    In quel caso non dobbiamo penalizzare o nascondere pagine storiche.
+    """
+    return bool(re.search(r"\b(19|20)\d{2}\b", query.lower()))
+
+
+def normalize_url_for_dedup(url: str) -> str:
+    """
+    Normalizza URL per deduplicare versioni canoniche e versioni con parametri.
+
+    Esempio:
+    /offerta-formativa
+    /offerta-formativa?anno=2021
+
+    diventano la stessa chiave logica.
+    """
+    if not url or url == "unknown":
+        return "unknown"
+
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/") or "/"
+
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            path,
+            "",
+            "",
+        )
+    )
 
 
 def expand_query_for_retrieval(query: str) -> str:
@@ -122,6 +166,10 @@ def expand_query_for_retrieval(query: str) -> str:
             "offerta formativa",
             "corsi di studio",
             "programmi di studio",
+            "corsi del dipartimento",
+            "corsi del diem",
+            "corsi offerti",
+            "corsi disponibili",
         ]
     )
 
@@ -179,6 +227,8 @@ def expand_query_for_retrieval(query: str) -> str:
                 "erasmus",
                 "mobilità",
                 "accordi erasmus plus",
+                "mobilità per studio",
+                "erasmus studio",
                 "traineeship",
                 "studio all'estero",
             ]
@@ -273,6 +323,34 @@ def expand_query_for_retrieval(query: str) -> str:
                 "università partner",
                 "paese",
                 "data scadenza",
+            ]
+        )
+        
+    wants_phd_info = any(
+        keyword in query_lower
+        for keyword in [
+            "dottorato",
+            "dottorati",
+            "dottorato di ricerca",
+            "dottorati di ricerca",
+            "phd",
+            "ph.d",
+            "ph.d.",
+        ]
+    )
+
+    if wants_phd_info:
+        expanded_terms.extend(
+            [
+                "dottorato di ricerca",
+                "dottorati di ricerca",
+                "phd",
+                "doctoral research program",
+                "doctoral education",
+                "information engineering",
+                "photovoltaics",
+                "collegio di dottorato",
+                "coordinatore del dottorato",
             ]
         )
     
@@ -407,31 +485,42 @@ def reciprocal_rank_fusion(
 def deduplicate_by_url(
     results: list[RetrievalResult],
     max_per_url: int = 1,
+    query: str = "",
 ) -> list[RetrievalResult]:
+    """
+    Deduplica i risultati per URL.
+
+    Se la query non cita un anno, usa una chiave canonica senza parametri:
+    questo evita di mostrare insieme pagina corrente e pagina storica.
+
+    Se la query cita un anno, mantiene gli URL completi:
+    questo permette di recuperare pagine storiche come ?anno=2021.
+    """
     counts: dict[str, int] = {}
     deduped: list[RetrievalResult] = []
 
-    for result in results:
-        url = (
-            result.metadata.get("source_url")
-            or result.metadata.get("document_url")
-            or result.metadata.get("url")
-            or "unknown"
-        )
+    query_has_year = query_mentions_explicit_year(query)
 
-        current_count = counts.get(url, 0)
+    for result in results:
+        url = get_result_url(result)
+
+        if query_has_year:
+            dedup_key = url
+        else:
+            dedup_key = normalize_url_for_dedup(url)
+
+        current_count = counts.get(dedup_key, 0)
 
         if current_count >= max_per_url:
             continue
 
-        counts[url] = current_count + 1
+        counts[dedup_key] = current_count + 1
         deduped.append(result)
 
     for rank, result in enumerate(deduped, start=1):
         result.rank = rank
 
     return deduped
-
 
 def is_single_profile_page(url: str) -> bool:
     """
@@ -597,6 +686,9 @@ def is_aggregate_query(query: str) -> bool:
             "accordi",
             "erasmus",
             "aule",
+            "dottorato",
+            "dottorati",
+            "phd",
         ]
     )
 
@@ -608,6 +700,36 @@ def is_erasmus_query(query: str) -> bool:
     return "erasmus" in query_lower
 
 
+def requested_erasmus_mobility(query: str) -> str | None:
+    query_lower = query.lower()
+
+    if any(term in query_lower for term in [
+        "per studio",
+        "studio",
+        "studenti",
+        "student mobility",
+        "study mobility",
+    ]):
+        return "studio"
+
+    if any(term in query_lower for term in [
+        "traineeship",
+        "tirocinio",
+        "tirocini",
+        "placement",
+    ]):
+        return "traineeship"
+
+    if any(term in query_lower for term in [
+        "docenza",
+        "teaching",
+        "docenti",
+    ]):
+        return "teaching"
+
+    return None
+
+
 def deduplicate_for_query(
     results: list[RetrievalResult],
     query: str,
@@ -616,24 +738,25 @@ def deduplicate_for_query(
     Deduplica adattata al tipo di domanda.
 
     Query puntuali:
-    - massimo 1 chunk per URL.
+    - massimo 1 chunk per URL logico.
 
     Query aggregative:
-    - più chunk per URL, perché liste e panoramiche possono essere distribuite
+    - più chunk per URL logico, perché liste e panoramiche possono essere distribuite
       su più sezioni della stessa pagina.
 
     Query Erasmus:
-    - massimo 2 chunk per URL, per evitare che una sola modalità
+    - massimo 2 chunk per URL logico, per evitare che una sola modalità
       monopolizzi il contesto.
+
+    Se la query contiene un anno esplicito, gli URL con parametri restano distinguibili.
     """
     if is_erasmus_query(query):
-        return deduplicate_by_url(results, max_per_url=2)
+        return deduplicate_by_url(results, max_per_url=2, query=query)
 
     if is_aggregate_query(query):
-        return deduplicate_by_url(results, max_per_url=4)
+        return deduplicate_by_url(results, max_per_url=4, query=query)
 
-    return deduplicate_by_url(results, max_per_url=1)
-
+    return deduplicate_by_url(results, max_per_url=1, query=query)
 
 def teacher_metadata_matches(
     teacher_name_tokens: set[str],
@@ -718,6 +841,10 @@ def rerank_with_metadata_signals(
             "offerta formativa",
             "corsi di studio",
             "programmi di studio",
+            "corsi del dipartimento",
+            "corsi del diem",
+            "corsi offerti",
+            "corsi disponibili",
         ]
     )
 
@@ -762,6 +889,19 @@ def rerank_with_metadata_signals(
         ]
     )
     
+    wants_phd_info = any(
+        keyword in query_lower
+        for keyword in [
+            "dottorato",
+            "dottorati",
+            "dottorato di ricerca",
+            "dottorati di ricerca",
+            "phd",
+            "ph.d",
+            "ph.d.",
+        ]
+    )
+    
     wants_erasmus_bando_info = any(
         keyword in query_lower
         for keyword in [
@@ -794,9 +934,11 @@ def rerank_with_metadata_signals(
         ]
     ) and "erasmus" in query_lower
     
+    erasmus_mobility = requested_erasmus_mobility(query)
+    
     wants_aggregate_info = is_aggregate_query(query)
 
-    query_mentions_year = bool(re.search(r"20\d{2}", query_lower))
+    query_mentions_year = query_mentions_explicit_year(query)
 
     italian_query = not any(
         word in query_lower
@@ -888,13 +1030,16 @@ def rerank_with_metadata_signals(
         if italian_query and "/en" in url:
             adjusted_score *= 0.75
 
-        # Penalizza anni vecchi se l'utente non ha chiesto uno specifico anno
+        # Se l'utente non chiede un anno specifico, preferiamo URL canonici
+        # rispetto a versioni parametrizzate o storiche della stessa pagina.
         if not query_mentions_year:
-            year_match = re.search(r"anno=(20\d{2})", url)
-            if year_match:
-                year = int(year_match.group(1))
-                if year < 2025:
-                    adjusted_score *= 0.70
+            parsed_url = urlsplit(str(url))
+
+            if parsed_url.query:
+                adjusted_score *= 0.85
+
+            if re.search(r"(?:^|[?&])(?:anno|year|aa)=(?:19|20)\d{2}", str(url).lower()):
+                adjusted_score *= 0.75
 
         # Query specifica su corsi di laurea/offerta formativa
         if wants_degree_info:
@@ -955,14 +1100,76 @@ def rerank_with_metadata_signals(
 
             if "mobilità per docenza" in title or "mobilità per docenza" in breadcrumb:
                 adjusted_score *= 1.20
+            
+            if erasmus_mobility == "studio":
+                if "accordi-erasmus-plus/studio" in str(url).lower():
+                    adjusted_score *= 2.60
+
+                if "mobilità per studio" in title or "mobilità per studio" in breadcrumb:
+                    adjusted_score *= 2.00
+
+                if "traineeship" in str(url).lower() or "docenza" in str(url).lower() or "teaching" in str(url).lower():
+                    adjusted_score *= 0.45
+
+            elif erasmus_mobility == "traineeship":
+                if "accordi-erasmus-plus/traineeship" in str(url).lower():
+                    adjusted_score *= 2.60
+
+                if "mobilità per traineeship" in title or "mobilità per traineeship" in breadcrumb:
+                    adjusted_score *= 2.00
+
+                if "studio" in str(url).lower() or "docenza" in str(url).lower() or "teaching" in str(url).lower():
+                    adjusted_score *= 0.45
+
+            elif erasmus_mobility == "teaching":
+                if "accordi-erasmus-plus/teaching" in str(url).lower():
+                    adjusted_score *= 2.60
+
+                if "mobilità per docenza" in title or "mobilità per docenza" in breadcrumb:
+                    adjusted_score *= 2.00
+
+                if "studio" in str(url).lower() or "traineeship" in str(url).lower():
+                    adjusted_score *= 0.45
         
         # Query didattica generica, ma non specifica sui corsi di laurea
-        elif wants_teaching_info:
+        elif wants_teaching_info and not wants_degree_info:
             if "didattica" in title or "didattica" in breadcrumb:
                 adjusted_score *= 1.10
 
             if "offerta-formativa" in url:
                 adjusted_score *= 1.10
+                
+        if wants_phd_info:
+            text_lower = result.text.lower()
+            url_lower = str(url).lower()
+
+            if "diem.unisa.it" in url_lower and (
+                "department" in url_lower or "dipartimento" in url_lower
+            ):
+                adjusted_score *= 1.60
+
+            if "commissions-and-delegates" in url_lower:
+                adjusted_score *= 1.60
+
+            if "doctoral" in text_lower or "dottorato" in text_lower or "dottorati" in text_lower:
+                adjusted_score *= 1.50
+
+            if (
+                "phd program in information engineering" in text_lower
+                or "dottorato di ricerca in ingegneria dell" in text_lower
+                or "dottorato in ingegneria dell" in text_lower
+            ):
+                adjusted_score *= 1.80
+
+            if (
+                "nationally significant phd program in photovoltaics" in text_lower
+                or "dottorato di interesse nazionale in photovoltaics" in text_lower
+                or "dottorato di ricerca in photovoltaics" in text_lower
+            ):
+                adjusted_score *= 1.80
+
+            if "docenti.unisa.it" in url_lower and "curriculum" in url_lower:
+                adjusted_score *= 0.65
 
         result.score = adjusted_score
 

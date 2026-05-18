@@ -44,15 +44,16 @@ cp .env.example .env
 Modifica `config.yaml` per impostare limiti di crawl, domini ammessi,
 profondità, rate limit e path degli output.
 
-Modifica `.env` per impostare il modello Ollama usato nella fase RAG:
+Modifica `.env` per impostare la chiave API Groq e il modello usato nella fase RAG:
 
 ```env
-OLLAMA_MODEL=llama3.2:3b
-OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_TIMEOUT_SECONDS=60
 RAG_FINAL_K=3
 RAG_MAX_CONTEXT_CHARS=6000
 ```
-Per usare la generazione RAG è necessario avere Ollama installato, avviato e il modello
+Per usare la generazione RAG è necessario disporre di una API key Groq valida.
 
 ## Comandi Principali
 
@@ -111,10 +112,10 @@ Chatbot RAG da terminale:
 python src/chatbot.py
 ```
 
-Esempio con modello Ollama e numero di chunk personalizzato:
+Esempio con modello Groq e numero di chunk personalizzato:
 
 ```bash
-python src/chatbot.py --model llama3.2:3b --final-k 3
+python src/chatbot.py --model llama-3.3-70b-versatile --final-k 3
 ```
 
 Ripartenza pulita:
@@ -153,7 +154,8 @@ Il modulo `src/rag_chain.py` implementa la pipeline RAG completa:
 - recupera i chunk più rilevanti tramite `retrieval.py`;
 - costruisce un contesto compatto da passare al modello LLM;
 - genera un prompt vincolato alle fonti DIEM;
-- chiama un modello instruct locale tramite Ollama;
+- chiama un modello LLM tramite API Groq;
+- interpreta gli indici dei documenti usati dal modello;
 - restituisce risposta e fonti utilizzate.
 
 Il modulo `src/chatbot.py` fornisce una semplice interfaccia da terminale per interrogare il chatbot.
