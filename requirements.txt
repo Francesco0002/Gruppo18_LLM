@@ -60,3 +60,4 @@ langchain-protocol==0.0.15
 sentence-transformers==5.4.1
 rank-bm25
 groq
+chainlit
