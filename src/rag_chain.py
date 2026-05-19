@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import requests
 from dotenv import load_dotenv
+from groq import Groq
 
 from pipeline_io import BASE_DIR
 
@@ -18,16 +18,12 @@ load_dotenv(BASE_DIR / ".env", override=True)
 from retrieval import RetrievalResult, hybrid_retrieve
 
 
-DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-DEFAULT_OLLAMA_ENDPOINT = os.getenv(
-    "OLLAMA_ENDPOINT",
-    "http://localhost:11434/api/generate",
-)
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "3"))
 DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "6000"))
 
-OLLAMA_TIMEOUT_SECONDS = 180
+GROQ_TIMEOUT_SECONDS = int(os.getenv("GROQ_TIMEOUT_SECONDS", "60"))
 
 
 @dataclass
@@ -207,54 +203,47 @@ RISPOSTA:
 """.strip()
 
 
-def call_ollama(
+def call_groq(
     prompt: str,
-    model: str = DEFAULT_OLLAMA_MODEL,
-    endpoint: str = DEFAULT_OLLAMA_ENDPOINT,
+    model: str = DEFAULT_GROQ_MODEL,
 ) -> str:
     """
-    Chiama Ollama tramite API HTTP locale.
-    Richiede Ollama avviato e il modello già scaricato.
+    Chiama Groq tramite API.
+    Richiede GROQ_API_KEY nel file .env.
     """
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "top_p": 0.9,
-        },
-    }
+    api_key = os.getenv("GROQ_API_KEY")
+
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY non trovata. "
+            "Aggiungila nel file .env, ad esempio: GROQ_API_KEY=gsk_..."
+        )
+
+    client = Groq(api_key=api_key)
 
     try:
-        response = requests.post(
-            endpoint,
-            json=payload,
-            timeout=OLLAMA_TIMEOUT_SECONDS,
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            temperature=0.1,
+            top_p=0.9,
+            stream=False,
+            timeout=GROQ_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
-    except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError(
-            "Impossibile connettersi a Ollama. "
-            "Verifica che Ollama sia avviato e che l'endpoint sia corretto."
-        ) from exc
-    except requests.exceptions.Timeout as exc:
-        raise RuntimeError(
-            "Timeout durante la chiamata a Ollama. "
-            "Prova con un modello più leggero o riduci il contesto."
-        ) from exc
-    except requests.exceptions.HTTPError as exc:
-        raise RuntimeError(
-            f"Errore HTTP da Ollama: {response.status_code} - {response.text}"
-        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Errore durante la chiamata a Groq: {exc}") from exc
 
-    data = response.json()
-    answer = data.get("response", "").strip()
+    answer = completion.choices[0].message.content
 
     if not answer:
-        raise RuntimeError("Ollama ha restituito una risposta vuota.")
+        raise RuntimeError("Groq ha restituito una risposta vuota.")
 
-    return answer
+    return answer.strip()
 
 
 def format_sources(sources: list[Source]) -> str:
@@ -302,31 +291,6 @@ def parse_used_source_indexes(answer: str) -> tuple[str, list[int]]:
     return cleaned_answer, indexes
 
 
-def filter_sources_by_indexes(
-    sources: list[Source],
-    used_indexes: list[int],
-) -> list[Source]:
-    """
-    Converte gli indici [1, 2, ...] dichiarati dal modello
-    nelle fonti corrispondenti.
-    """
-    if not used_indexes:
-        return []
-
-    filtered_sources: list[Source] = []
-
-    for index in used_indexes:
-        source_position = index - 1
-
-        if 0 <= source_position < len(sources):
-            source = sources[source_position]
-
-            if source not in filtered_sources:
-                filtered_sources.append(source)
-
-    return filtered_sources
-
-
 GENERIC_TEACHER_WORDS = {
     "professor",
     "professore",
@@ -362,6 +326,45 @@ GENERIC_TEACHER_WORDS = {
     "una",
     "uno",
 }
+
+
+def filter_sources_by_document_indexes(
+    results: list[RetrievalResult],
+    used_indexes: list[int],
+) -> list[Source]:
+    """
+    Converte gli indici dichiarati dal modello rispetto ai DOCUMENTI del contesto
+    nelle fonti corrispondenti.
+
+    Esempio:
+    DOCUMENTO 1 -> Studio
+    DOCUMENTO 2 -> Studio
+    DOCUMENTO 3 -> Traineeship
+
+    Se il modello restituisce FONTI_USATE: [1, 2],
+    la fonte finale deve essere solo Studio, non Studio + Traineeship.
+    """
+    if not used_indexes:
+        return []
+
+    filtered_sources: list[Source] = []
+    seen_urls: set[str] = set()
+
+    for index in used_indexes:
+        result_position = index - 1
+
+        if not 0 <= result_position < len(results):
+            continue
+
+        source = get_source_from_result(results[result_position])
+
+        if source.url in seen_urls:
+            continue
+
+        seen_urls.add(source.url)
+        filtered_sources.append(source)
+
+    return filtered_sources
 
 
 def simple_tokenize(text: str) -> set[str]:
@@ -426,6 +429,83 @@ def is_generic_office_hours_query(question: str) -> bool:
     teacher_name_tokens = simple_tokenize(question_lower)
 
     return not teacher_name_tokens
+
+
+def is_out_of_scope_university_query(question: str) -> bool:
+    """
+    Riconosce domande rivolte esplicitamente ad altre università.
+    Il chatbot deve rispondere solo su DIEM/UNISA.
+    """
+    question_lower = question.lower()
+
+    allowed_terms = [
+        "diem",
+        "unisa",
+        "università di salerno",
+        "universita di salerno",
+        "university of salerno",
+    ]
+
+    if any(term in question_lower for term in allowed_terms):
+        return False
+
+    other_university_patterns = [
+        r"\buniversità di\s+(?!salerno\b)[a-zà-ÿ\s]+",
+        r"\buniversita di\s+(?!salerno\b)[a-zà-ÿ\s]+",
+        r"\buniversity of\s+(?!salerno\b)[a-zà-ÿ\s]+",
+        r"\bpolitecnico di\s+[a-zà-ÿ\s]+",
+    ]
+
+    return any(
+        re.search(pattern, question_lower)
+        for pattern in other_university_patterns
+    )
+    
+
+def is_out_of_scope_department_query(question: str) -> bool:
+    """
+    Riconosce domande rivolte esplicitamente a un dipartimento diverso dal DIEM,
+    senza mantenere una lista dei dipartimenti UNISA.
+    """
+    question_lower = question.lower()
+
+    allowed_terms = [
+        "diem",
+        "dipartimento di ingegneria dell'informazione ed elettrica",
+        "dipartimento di ingegneria dell informazione ed elettrica",
+    ]
+
+    if any(term in question_lower for term in allowed_terms):
+        return False
+
+    if "dipartimento" not in question_lower:
+        return False
+
+    asks_department_info = any(
+        keyword in question_lower
+        for keyword in [
+            "corsi",
+            "corso",
+            "lauree",
+            "laurea",
+            "docenti",
+            "laboratori",
+            "strutture",
+            "servizi",
+            "offerta formativa",
+            "dove si trova",
+        ]
+    )
+
+    mentions_named_department = bool(
+        re.search(
+            r"\bdipartimento\s+(?:di\s+)?[a-zA-ZÀ-ÿ0-9_-]+",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+    return asks_department_info and mentions_named_department
 
 
 def teacher_metadata_matches(
@@ -586,65 +666,11 @@ def build_direct_office_hours_answer(
     return "\n".join(lines)
 
 
-def parse_used_source_indexes(answer: str) -> tuple[str, list[int]]:
-    """
-    Estrae la riga tecnica FONTI_USATE: [1, 2] dalla risposta del modello.
-    """
-    pattern = re.compile(
-        r"FONTI_USATE\s*:\s*\[([0-9,\s]*)\]",
-        re.IGNORECASE,
-    )
-
-    match = pattern.search(answer)
-
-    if not match:
-        return answer.strip(), []
-
-    raw_indexes = match.group(1)
-
-    indexes: list[int] = []
-
-    for item in raw_indexes.split(","):
-        item = item.strip()
-
-        if item.isdigit():
-            indexes.append(int(item))
-
-    cleaned_answer = pattern.sub("", answer).strip()
-
-    return cleaned_answer, indexes
-
-
-def filter_sources_by_indexes(
-    sources: list[Source],
-    used_indexes: list[int],
-) -> list[Source]:
-    """
-    Converte gli indici [1, 2, ...] dichiarati dal modello
-    nelle fonti corrispondenti.
-    """
-    if not used_indexes:
-        return []
-
-    filtered_sources: list[Source] = []
-
-    for index in used_indexes:
-        source_position = index - 1
-
-        if 0 <= source_position < len(sources):
-            source = sources[source_position]
-
-            if source not in filtered_sources:
-                filtered_sources.append(source)
-
-    return filtered_sources
-
-
 def answer_question(
     question: str,
     final_k: int = DEFAULT_FINAL_K,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
-    model: str = DEFAULT_OLLAMA_MODEL,
+    model: str = DEFAULT_GROQ_MODEL,
 ) -> RagResponse:
     """
     Pipeline RAG completa:
@@ -654,6 +680,22 @@ def answer_question(
 
     if not question:
         raise ValueError("La domanda non può essere vuota.")
+    
+    if is_out_of_scope_university_query(question):
+        return RagResponse(
+            question=question,
+            answer="La domanda è fuori dal contesto del DIEM.",
+            sources=[],
+            retrieved_chunks=[],
+        )
+        
+    if is_out_of_scope_department_query(question):
+        return RagResponse(
+            question=question,
+            answer="La domanda è fuori dal contesto del DIEM.",
+            sources=[],
+            retrieved_chunks=[],
+        )
 
     # Caso particolare ma generale:
     # se l'utente chiede gli orari di ricevimento dei docenti senza indicare il nome,
@@ -705,7 +747,7 @@ def answer_question(
         )
         
     # Se la domanda riguarda l'orario di ricevimento di un docente specifico
-    # ma non siamo riusciti a estrarre la tabella, non passiamo a Ollama:
+    # ma non siamo riusciti a estrarre la tabella, non passiamo al modello generativo:
     # meglio evitare risposte inventate o errori di memoria.
     if is_specific_office_hours_query(question):
         sources = build_sources(retrieved_chunks)
@@ -727,7 +769,7 @@ def answer_question(
 
     prompt = build_prompt(question=question, context=context)
 
-    raw_answer = call_ollama(
+    raw_answer = call_groq(
         prompt=prompt,
         model=model,
     )
@@ -736,21 +778,35 @@ def answer_question(
 
     all_sources = build_sources(retrieved_chunks)
 
-    used_sources = filter_sources_by_indexes(
-        sources=all_sources,
+    used_sources = filter_sources_by_document_indexes(
+        results=retrieved_chunks,
         used_indexes=used_source_indexes,
     )
 
     # Fallback:
     # se il modello non rispetta il formato FONTI_USATE,
     # mostriamo solo la prima fonte recuperata invece di tutte le fonti rumorose.
-    if (
-        not used_sources
-        and all_sources
-        and "non ho trovato" not in clean_answer.lower()
-        and "fuori dominio" not in clean_answer.lower()
-    ):
+    answer_lower = clean_answer.lower()
+    
+    is_no_source_answer = any(
+        phrase in answer_lower
+        for phrase in [
+            "non ho trovato",
+            "fuori dominio",
+            "fuori dal contesto",
+            "fuori dal dominio",
+            "non riguarda il diem",
+            "non riguarda le fonti diem",
+        ]
+    )
+    
+    
+
+    if not used_sources and all_sources and not is_no_source_answer:
         used_sources = all_sources[:1]
+
+    if is_no_source_answer:
+        used_sources = []
 
     return RagResponse(
         question=question,
@@ -763,7 +819,7 @@ def answer_question(
 def answer_question_as_text(
     question: str,
     final_k: int = DEFAULT_FINAL_K,
-    model: str = DEFAULT_OLLAMA_MODEL,
+    model: str = DEFAULT_GROQ_MODEL,
 ) -> str:
     """
     Utility comoda per CLI: restituisce risposta già formattata con fonti.

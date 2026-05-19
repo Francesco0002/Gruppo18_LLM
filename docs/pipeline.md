@@ -24,7 +24,7 @@ vector_store.py
 retrieval.py
   -> BM25 + dense retrieval + fusione RRF dei risultati
 rag_chain.py
-  -> prompt RAG + generazione risposta con LLM locale
+  -> prompt RAG + generazione risposta tramite API Groq
 chatbot.py
   -> interfaccia CLI per interrogare il chatbot
 ```
@@ -518,7 +518,7 @@ python src/chatbot.py
 Comando con modello e numero di chunk personalizzati:
 
 ```bash
-python src/chatbot.py --model llama3.2:3b --final-k 3
+python src/chatbot.py --model llama-3.3-70b-versatile --final-k 3
 ```
 
 Responsabilità:
@@ -527,7 +527,7 @@ Responsabilità:
 - usa `retrieval.py` per recuperare i chunk più rilevanti dal corpus DIEM;
 - costruisce un contesto compatto usando titolo, URL, breadcrumb, chunk ID e contenuto dei chunk;
 - genera un prompt RAG vincolato alle fonti recuperate;
-- invia il prompt a un modello instruct locale tramite Ollama;
+- invia il prompt a un modello LLM tramite API Groq;
 - restituisce una risposta in italiano insieme alle fonti utilizzate.
 
 La generazione avviene tramite il modulo `src/rag_chain.py`, che implementa la pipeline:
@@ -537,7 +537,7 @@ domanda utente
   -> hybrid retrieval
   -> costruzione contesto
   -> prompt RAG
-  -> chiamata Ollama
+  -> chiamata Groq API
   -> risposta + fonti
 ```
 
@@ -548,8 +548,9 @@ Se la domanda è fuori dominio rispetto al DIEM, il chatbot deve segnalarlo inve
 Le variabili principali sono configurate tramite `.env`:
 
 ```env
-OLLAMA_MODEL=llama3.2:3b
-OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_TIMEOUT_SECONDS=60
 RAG_FINAL_K=3
 RAG_MAX_CONTEXT_CHARS=6000
 ```

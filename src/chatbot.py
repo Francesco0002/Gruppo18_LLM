@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from rag_chain import DEFAULT_FINAL_K, DEFAULT_OLLAMA_MODEL, answer_question_as_text
-
+from rag_chain import DEFAULT_FINAL_K, DEFAULT_GROQ_MODEL, answer_question_as_text
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -13,8 +12,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_OLLAMA_MODEL,
-        help="Nome del modello Ollama da usare.",
+        default=DEFAULT_GROQ_MODEL,
+        help="Nome del modello Groq da usare.",
     )
 
     parser.add_argument(
@@ -27,7 +26,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("DIEM Chatbot RAG")
-    print(f"Modello Ollama: {args.model}")
+    print(f"Modello Groq: {args.model}")
     print(f"Chunk usati per risposta: {args.final_k}")
     print("Scrivi 'exit', 'quit' o 'q' per uscire.")
     print("-" * 80)
