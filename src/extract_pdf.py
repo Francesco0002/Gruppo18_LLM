@@ -46,6 +46,7 @@ from url_filters import can_traverse_url, normalize_url, parse_mime
 PDF_SIGNATURE = b"%PDF-"
 PDF_MIMES = {"application/pdf", "application/x-pdf"}
 DEFAULT_MAX_PDF_BYTES = 100 * 1024 * 1024
+PDF_SIGNATURE_BUFFER_BYTES = 1024
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,6 @@ class PdfRuntimeSettings:
     max_concurrent_downloads: int
     download_delay_seconds: float
     force_reextract: bool
-    use_layout: bool
     extraction_kwargs: dict[str, object]
 
 
@@ -68,8 +68,7 @@ def load_pdf_runtime_settings(config: dict) -> PdfRuntimeSettings:
     # Copiamo il dict prima di modificarlo: il config caricato resta la fonte
     # di verita per stats e documentazione del run.
     extraction = dict(crawler.get("pdf_extraction", {}))
-    use_layout = bool(extraction.pop("use_layout", True))
-    extraction.setdefault("use_layout", use_layout)
+    extraction["use_layout"] = bool(extraction.get("use_layout", True))
     return PdfRuntimeSettings(
         max_bytes=int(crawler.get("pdf_max_bytes", DEFAULT_MAX_PDF_BYTES)),
         skip_recent_days=int(crawler.get("pdf_skip_recent_days", 7)),
@@ -77,7 +76,6 @@ def load_pdf_runtime_settings(config: dict) -> PdfRuntimeSettings:
         max_concurrent_downloads=int(crawler.get("pdf_max_concurrent_downloads", 3)),
         download_delay_seconds=float(crawler.get("pdf_download_delay_seconds", 0.0)),
         force_reextract=bool(crawler.get("pdf_force_reextract", False)),
-        use_layout=use_layout,
         extraction_kwargs=extraction,
     )
 
@@ -201,9 +199,11 @@ def has_pdf_signature(data: bytes) -> bool:
 
 def existing_raw_pdf_is_valid(path: Path, settings: PdfRuntimeSettings) -> bool:
     """True se un raw gia presente e riutilizzabile senza nuovo download."""
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
         return False
-    if path.stat().st_size <= 0 or path.stat().st_size > settings.max_bytes:
+    if stat.st_size <= 0 or stat.st_size > settings.max_bytes:
         return False
     # La sola esistenza del file non basta: dopo crash o interruzioni potrebbe
     # essere rimasto un raw parziale con estensione .pdf ma contenuto invalido.
@@ -228,6 +228,100 @@ def pdf_error_download(
     }
 
 
+def http_error_kind(error: httpx.HTTPError) -> str:
+    """Classifica errori HTTP/download in categorie stabili per gli stats."""
+    if isinstance(error, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if status == 404:
+            return "http_404"
+        if 400 <= status < 500:
+            return f"http_{status}"
+        if 500 <= status < 600:
+            return "http_5xx"
+    return "http_error"
+
+
+def _raw_pdf_download_result(
+    record: DiscoveryRecord,
+    output_path: Path,
+    *,
+    reused_raw: bool,
+    network_downloaded: bool,
+) -> dict:
+    """Payload stabile per un PDF pronto all'estrazione."""
+    return {
+        "record": record,
+        "status": "downloaded",
+        "content_length": output_path.stat().st_size,
+        "raw_pdf_path": relative_path(output_path),
+        "reused_raw": reused_raw,
+        "network_downloaded": network_downloaded,
+    }
+
+
+def _too_large_download(record: DiscoveryRecord, content_length: int) -> dict:
+    """Payload comune per PDF scartati per dimensione."""
+    return {
+        "record": record,
+        "status": "too_large",
+        "content_length": content_length,
+        "raw_pdf_path": None,
+    }
+
+
+def _content_length_too_large(headers: httpx.Headers, settings: PdfRuntimeSettings) -> int | None:
+    """Ritorna Content-Length quando supera la soglia configurata."""
+    content_length = headers.get("Content-Length")
+    if content_length and content_length.isdigit() and int(content_length) > settings.max_bytes:
+        return int(content_length)
+    return None
+
+
+def _temp_pdf_path(output_path: Path) -> Path:
+    """Path temporaneo atomico associato al raw finale."""
+    return output_path.with_name(f"{output_path.name}.tmp.{uuid4().hex}")
+
+
+def _record_pdf_chunk(
+    chunk: bytes,
+    downloaded: int,
+    signature_buffer: bytearray,
+    settings: PdfRuntimeSettings,
+) -> tuple[int, bool]:
+    """Aggiorna contatore byte e signature buffer per uno stream PDF."""
+    downloaded += len(chunk)
+    if downloaded > settings.max_bytes:
+        return downloaded, True
+    if len(signature_buffer) < PDF_SIGNATURE_BUFFER_BYTES:
+        remaining = PDF_SIGNATURE_BUFFER_BYTES - len(signature_buffer)
+        signature_buffer.extend(chunk[:remaining])
+    return downloaded, False
+
+
+def _pdf_validation_error(
+    record: DiscoveryRecord,
+    content_type: str,
+    signature: bytes,
+) -> dict | None:
+    """Valida MIME e signature evitando drift tra download sync e async."""
+    has_signature = has_pdf_signature(signature)
+    if content_type not in PDF_MIMES and not has_signature:
+        return pdf_error_download(
+            record,
+            "invalid_pdf_response",
+            f"invalid_pdf_response:{content_type or 'missing_content_type'}",
+        )
+    if not has_signature:
+        return pdf_error_download(
+            record,
+            "invalid_pdf_signature",
+            "invalid_pdf_signature",
+        )
+    return None
+
+
 def _download_body_to_temp(
     response: object,
     temp_path: Path,
@@ -241,14 +335,9 @@ def _download_body_to_temp(
     # server interrompe lo stream o il file supera la soglia configurata.
     with temp_path.open("wb") as file:
         for chunk in response.iter_bytes():
-            downloaded += len(chunk)
-            if downloaded > settings.max_bytes:
-                too_large = True
+            downloaded, too_large = _record_pdf_chunk(chunk, downloaded, signature_buffer, settings)
+            if too_large:
                 break
-            # I primi byte bastano per validare la signature senza tenere in
-            # memoria l'intero PDF, che puo essere molto grande.
-            if len(signature_buffer) < 1024:
-                signature_buffer.extend(chunk[: 1024 - len(signature_buffer)])
             file.write(chunk)
     return downloaded, bytes(signature_buffer), too_large
 
@@ -262,27 +351,20 @@ def download_pdf(
 ) -> dict:
     """Download sincrono compatibile con codice legacy e test locali."""
     settings = settings or load_pdf_runtime_settings(config)
-    url = record["url"]
+    url = normalize_url(record["url"])
     url_hash = record["hash"]
     output_path = raw_pdf_path(url_hash, config)
 
     # Il riuso dei raw evita download ripetuti nelle riesecuzioni incrementali.
     # `force_reextract` permette comunque di invalidare volontariamente la cache.
     if not settings.force_reextract and existing_raw_pdf_is_valid(output_path, settings):
-        return {
-            "record": record,
-            "status": "downloaded",
-            "content_length": output_path.stat().st_size,
-            "raw_pdf_path": relative_path(output_path),
-            "reused_raw": True,
-            "network_downloaded": False,
-        }
+        return _raw_pdf_download_result(record, output_path, reused_raw=True, network_downloaded=False)
 
     if limiter is not None:
         limiter.wait(urlparse(url).netloc)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid4().hex}")
+    temp_path = _temp_pdf_path(output_path)
     try:
         with client.stream("GET", url, follow_redirects=True) as response:
             response.raise_for_status()
@@ -295,51 +377,21 @@ def download_pdf(
                     f"redirected_out_of_scope:{reason}",
                 )
 
-            content_length = response.headers.get("Content-Length")
-            if content_length and content_length.isdigit() and int(content_length) > settings.max_bytes:
-                return {
-                    "record": record,
-                    "status": "too_large",
-                    "content_length": int(content_length),
-                    "raw_pdf_path": None,
-                }
+            too_large_length = _content_length_too_large(response.headers, settings)
+            if too_large_length is not None:
+                return _too_large_download(record, too_large_length)
 
             downloaded, signature, too_large = _download_body_to_temp(response, temp_path, settings)
             if too_large:
-                return {
-                    "record": record,
-                    "status": "too_large",
-                    "content_length": downloaded,
-                    "raw_pdf_path": None,
-                }
+                return _too_large_download(record, downloaded)
 
             content_type = parse_mime(response.headers.get("Content-Type", ""))
-            # Alcuni server dichiarano MIME generici ma servono PDF validi;
-            # altri restituiscono HTML di errore con URL .pdf. Per questo
-            # accettiamo MIME oppure signature, ma pretendiamo comunque la
-            # signature prima di promuovere il temp file a raw definitivo.
-            if content_type not in PDF_MIMES and not has_pdf_signature(signature):
-                return pdf_error_download(
-                    record,
-                    "invalid_pdf_response",
-                    f"invalid_pdf_response:{content_type or 'missing_content_type'}",
-                )
-            if not has_pdf_signature(signature):
-                return pdf_error_download(
-                    record,
-                    "invalid_pdf_signature",
-                    "invalid_pdf_signature",
-                )
+            validation_error = _pdf_validation_error(record, content_type, signature)
+            if validation_error is not None:
+                return validation_error
 
         temp_path.replace(output_path)
-        return {
-            "record": record,
-            "status": "downloaded",
-            "content_length": output_path.stat().st_size,
-            "raw_pdf_path": relative_path(output_path),
-            "reused_raw": False,
-            "network_downloaded": True,
-        }
+        return _raw_pdf_download_result(record, output_path, reused_raw=False, network_downloaded=True)
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
@@ -359,12 +411,9 @@ async def _download_body_to_temp_async(
     # Stessa logica della variante sincrona, ma usata dalla pipeline reale.
     with temp_path.open("wb") as file:
         async for chunk in response.aiter_bytes():
-            downloaded += len(chunk)
-            if downloaded > settings.max_bytes:
-                too_large = True
+            downloaded, too_large = _record_pdf_chunk(chunk, downloaded, signature_buffer, settings)
+            if too_large:
                 break
-            if len(signature_buffer) < 1024:
-                signature_buffer.extend(chunk[: 1024 - len(signature_buffer)])
             file.write(chunk)
     return downloaded, bytes(signature_buffer), too_large
 
@@ -376,24 +425,17 @@ async def download_pdf_async(
     settings: PdfRuntimeSettings,
 ) -> dict:
     """Scarica un PDF in modo asincrono, atomico e validato."""
-    url = record["url"]
+    url = normalize_url(record["url"])
     url_hash = record["hash"]
     output_path = raw_pdf_path(url_hash, config)
 
     # I raw validi gia presenti entrano direttamente nella coda di estrazione:
     # questa e la scorciatoia che rende economiche le run incrementali.
     if not settings.force_reextract and existing_raw_pdf_is_valid(output_path, settings):
-        return {
-            "record": record,
-            "status": "downloaded",
-            "content_length": output_path.stat().st_size,
-            "raw_pdf_path": relative_path(output_path),
-            "reused_raw": True,
-            "network_downloaded": False,
-        }
+        return _raw_pdf_download_result(record, output_path, reused_raw=True, network_downloaded=False)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid4().hex}")
+    temp_path = _temp_pdf_path(output_path)
     try:
         async with client.stream("GET", url, follow_redirects=True) as response:
             response.raise_for_status()
@@ -406,14 +448,9 @@ async def download_pdf_async(
                     f"redirected_out_of_scope:{reason}",
                 )
 
-            content_length = response.headers.get("Content-Length")
-            if content_length and content_length.isdigit() and int(content_length) > settings.max_bytes:
-                return {
-                    "record": record,
-                    "status": "too_large",
-                    "content_length": int(content_length),
-                    "raw_pdf_path": None,
-                }
+            too_large_length = _content_length_too_large(response.headers, settings)
+            if too_large_length is not None:
+                return _too_large_download(record, too_large_length)
 
             downloaded, signature, too_large = await _download_body_to_temp_async(
                 response,
@@ -421,38 +458,17 @@ async def download_pdf_async(
                 settings,
             )
             if too_large:
-                return {
-                    "record": record,
-                    "status": "too_large",
-                    "content_length": downloaded,
-                    "raw_pdf_path": None,
-                }
+                return _too_large_download(record, downloaded)
 
             content_type = parse_mime(response.headers.get("Content-Type", ""))
-            if content_type not in PDF_MIMES and not has_pdf_signature(signature):
-                return pdf_error_download(
-                    record,
-                    "invalid_pdf_response",
-                    f"invalid_pdf_response:{content_type or 'missing_content_type'}",
-                )
-            if not has_pdf_signature(signature):
-                return pdf_error_download(
-                    record,
-                    "invalid_pdf_signature",
-                    "invalid_pdf_signature",
-                )
+            validation_error = _pdf_validation_error(record, content_type, signature)
+            if validation_error is not None:
+                return validation_error
 
         temp_path.replace(output_path)
-        return {
-            "record": record,
-            "status": "downloaded",
-            "content_length": output_path.stat().st_size,
-            "raw_pdf_path": relative_path(output_path),
-            "reused_raw": False,
-            "network_downloaded": True,
-        }
+        return _raw_pdf_download_result(record, output_path, reused_raw=False, network_downloaded=True)
     except httpx.HTTPError as error:
-        return pdf_error_download(record, "http_error", str(error))
+        return pdf_error_download(record, http_error_kind(error), str(error))
     except OSError as error:
         return pdf_error_download(record, "filesystem_error", str(error))
     except Exception as error:
@@ -492,6 +508,7 @@ def build_manifest_record(
     download: dict,
     markdown: str = "",
     error: str | None = None,
+    error_kind: str | None = None,
     config: dict | None = None,
 ) -> ProcessedRecord:
     """Crea un record processed per un PDF."""
@@ -524,7 +541,7 @@ def build_manifest_record(
             text_extracted=False,
             indexable=False,
             error=error or download.get("error", "download failed"),
-            error_kind=download.get("error_kind"),
+            error_kind=error_kind or download.get("error_kind"),
         )
         return manifest_record
 
@@ -765,7 +782,13 @@ async def run_extract_pdf_async(config: dict | None = None) -> dict:
                 settings.extraction_kwargs,
             )
             elapsed = time.perf_counter() - started
-            manifest = build_manifest_record(download, markdown=markdown, error=error, config=config)
+            manifest = build_manifest_record(
+                download,
+                markdown=markdown,
+                error=error,
+                error_kind="extract_failed" if error else None,
+                config=config,
+            )
             await append_manifest(manifest)
             async with stats_lock:
                 extraction_seconds += elapsed

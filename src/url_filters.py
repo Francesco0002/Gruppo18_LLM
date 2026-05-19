@@ -22,11 +22,13 @@ Tabella delle regole principali:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urldefrag, urlparse
 
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
+INVALID_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 TRACKING_QUERY_PARAMS = {"fbclid", "gclid", "msclkid"}
 # Query bloccate di default: spesso generano filtri, viste tecniche o duplicati.
 BLOCKED_QUERY_PARAMS = {
@@ -126,7 +128,7 @@ def normalize_url(url: str) -> str:
     url, _ = urldefrag(stripped)
     parsed = urlparse(url)
 
-    path = parsed.path or "/"
+    path = INVALID_PERCENT_RE.sub("%25", parsed.path or "/")
     lowered_path = path.lower()
     for index_name in ("/index.php", "/index.html", "/index.htm"):
         if lowered_path.endswith(index_name):

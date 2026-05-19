@@ -195,6 +195,45 @@ class AsyncPdfExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_kind"], "invalid_pdf_response")
 
+    async def test_http_status_error_is_reported_with_status_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = base_config(temp_dir)
+            settings = load_pdf_runtime_settings(config)
+
+            def handler(_request: httpx.Request) -> httpx.Response:
+                return httpx.Response(400, content=b"bad request")
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                result = await download_pdf_async(pdf_record(), config, client, settings)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_kind"], "http_400")
+
+    async def test_literal_percent_in_pdf_url_is_escaped_before_download(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = base_config(temp_dir)
+            settings = load_pdf_runtime_settings(config)
+            requested_urls: list[str] = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                requested_urls.append(str(request.url))
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/pdf"},
+                    content=b"%PDF-1.7\nbody",
+                )
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                result = await download_pdf_async(
+                    pdf_record("https://www.diem.unisa.it/uploads/file-(100%-Dipartimento).pdf"),
+                    config,
+                    client,
+                    settings,
+                )
+
+        self.assertEqual(result["status"], "downloaded")
+        self.assertIn("100%25-Dipartimento", requested_urls[0])
+
     async def test_too_large_response_is_reported_without_writing_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = base_config(temp_dir)

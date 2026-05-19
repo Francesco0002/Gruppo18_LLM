@@ -15,9 +15,11 @@ from ingest import (  # noqa: E402
     build_depth_coverage,
     build_extraction_stats,
     build_pdf_coverage,
+    build_processed_stats,
     compact_seed_rows,
     compact_depth_rows,
     discovery_failures_by_kind,
+    pdf_failures_by_kind,
 )
 from extract_pdf import build_manifest_record  # noqa: E402
 from markdown_cleaner import clean_markdown, clean_markdown_body  # noqa: E402
@@ -156,9 +158,9 @@ class DepthCoverageTests(unittest.TestCase):
             [
                 {
                     "depth": 0,
-                    "html_found_in_run": 0,
-                    "pdf_found_in_run": 0,
-                    "visited_html_in_run": 0,
+                    "html_recorded_at_depth": 0,
+                    "pdf_recorded_at_depth": 0,
+                    "html_visited_at_depth": 0,
                     "pending_new": 0,
                     "pending_reexpansion": 0,
                     "pending_from_lower_depths": 0,
@@ -167,9 +169,9 @@ class DepthCoverageTests(unittest.TestCase):
                 },
                 {
                     "depth": 1,
-                    "html_found_in_run": 3,
-                    "pdf_found_in_run": 2,
-                    "visited_html_in_run": 3,
+                    "html_recorded_at_depth": 3,
+                    "pdf_recorded_at_depth": 2,
+                    "html_visited_at_depth": 3,
                     "pending_new": 2,
                     "pending_reexpansion": 0,
                     "pending_from_lower_depths": 0,
@@ -190,16 +192,16 @@ class DepthCoverageTests(unittest.TestCase):
             [
                 {
                     "seed": "seed-a",
-                    "html_found_in_run_by_depth": {"0": 1, "1": 3},
-                    "pdf_found_in_run_by_depth": {"1": 1},
-                    "visited_html_in_run_by_depth": {"0": 1, "1": 3},
+                    "html_recorded_by_depth": {"0": 1, "1": 3},
+                    "pdf_recorded_by_depth": {"1": 1},
+                    "html_visited_by_depth": {"0": 1, "1": 3},
                     "pending_new_by_depth": {"1": 1},
                 },
                 {
                     "seed": "seed-b",
-                    "html_found_in_run_by_depth": {"0": 1, "1": 1},
-                    "pdf_found_in_run_by_depth": {},
-                    "visited_html_in_run_by_depth": {"0": 1, "1": 1},
+                    "html_recorded_by_depth": {"0": 1, "1": 1},
+                    "pdf_recorded_by_depth": {},
+                    "html_visited_by_depth": {"0": 1, "1": 1},
                     "pending_new_by_depth": {},
                 },
             ],
@@ -223,6 +225,7 @@ class DepthCoverageTests(unittest.TestCase):
                         "extracted_ok": 3,
                         "failed": 1,
                         "too_large": 0,
+                        "failure_kinds": {"http_400": 1},
                         "manifest": "ignored",
                     },
                 }
@@ -256,7 +259,7 @@ class DepthCoverageTests(unittest.TestCase):
                         "executor_backend": None,
                     },
                     "errors": {
-                        "failure_kinds": {},
+                        "failure_kinds": {"http_400": 1},
                     },
                 },
             },
@@ -385,6 +388,62 @@ class DepthCoverageTests(unittest.TestCase):
                 "timeout": 1,
             },
         )
+
+    def test_pdf_failures_are_grouped_by_kind(self) -> None:
+        records = [
+            {
+                "source": "pdf",
+                "status": "failed",
+                "error_kind": "http_error",
+                "error": "Client error '400 Bad Request' for url x",
+            },
+            {
+                "source": "pdf",
+                "status": "failed",
+                "error_kind": "download_error",
+                "error": "ReadTimeout timed out",
+            },
+            {
+                "source": "pdf",
+                "status": "failed",
+                "error_kind": "invalid_pdf_response",
+                "error": "text/html",
+            },
+            {
+                "source": "pdf",
+                "status": "failed",
+                "error": "bad rect",
+            },
+            {"source": "pdf", "status": "too_large"},
+            {"source": "html", "status": "failed", "error": "Client error '400 Bad Request'"},
+            {"source": "pdf", "status": "ok"},
+        ]
+
+        self.assertEqual(
+            pdf_failures_by_kind(records),
+            {
+                "extract_failed": 1,
+                "http_400": 1,
+                "invalid_pdf_response": 1,
+                "timeout": 1,
+                "too_large": 1,
+            },
+        )
+
+    def test_processed_stats_include_pdf_failure_reasons(self) -> None:
+        stats = build_processed_stats(
+            [
+                {
+                    "source": "pdf",
+                    "status": "failed",
+                    "error_kind": "http_error",
+                    "error": "Client error '400 Bad Request' for url x",
+                }
+            ],
+            {"duplicates": 0, "unique_content_hashes": 0, "history_records": 1},
+        )
+
+        self.assertEqual(stats["errors"]["pdf_failures"]["by_kind"], {"http_400": 1})
 
     def test_pending_depth_is_incomplete(self) -> None:
         coverage = build_depth_coverage(

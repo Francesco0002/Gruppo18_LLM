@@ -174,15 +174,16 @@ tutti sullo stesso piano:
 - `discovery.pdfs.summary`: bilancio dei PDF ammessi, bloccati e da rivedere;
 - `extraction.pdf.summary`, `volume`, `performance`, `errors`: esito operativo
   della sola fase PDF;
-- `processed.summary`, `distribution`, `content`: stato corrente del corpus,
-  distribuzioni e statistiche testuali.
+- `processed.summary`, `distribution`, `content`, `errors`: stato corrente del
+  corpus, distribuzioni, statistiche testuali e fallimenti PDF ancora attuali.
 
 La tabella `discovery.coverage.depths` concentra in un solo punto le metriche più
 utili per ogni livello:
 
-- `html_found_in_run`: pagine HTML trovate a quella depth nel run corrente;
-- `pdf_found_in_run`: PDF terminali trovati a quella depth nel run corrente;
-- `visited_html_in_run`: pagine HTML realmente visitate a quella depth;
+- `html_recorded_at_depth`: record HTML scritti nel run con quella depth;
+- `pdf_recorded_at_depth`: record PDF scritti nel run con quella depth, cioè
+  figli della depth precedente quando arrivano da link HTML;
+- `html_visited_at_depth`: pagine HTML realmente visitate a quella depth;
 - `pending_new`: URL nuovi ancora da visitare;
 - `pending_reexpansion`: pagine già viste da riespandere per aprire il livello
   successivo;
@@ -347,6 +348,12 @@ operativi del run: PDF pronti per l'estrazione, raw riusati, download di rete,
 byte scaricati, tempi di download/estrazione, throughput PDF/minuto, backend
 dell'executor e breakdown dei fallimenti. In questo modo una run lenta distingue
 chiaramente rete, parsing e documenti corrotti.
+
+Il blocco `processed.errors.pdf_failures.by_kind` ricostruisce lo stesso tipo di
+breakdown dal manifest corrente, quindi resta disponibile anche quando rigeneri
+le statistiche con `--stats-only`. Le categorie HTTP vengono rese esplicite
+quando il messaggio contiene lo status, ad esempio `http_400`, `http_404` o
+`http_5xx`; gli errori di parsing PDF finiscono in `extract_failed`.
 
 Nel report `discovery.pdfs` i nomi sono intenzionalmente espliciti:
 
