@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+from typing import Any
+
+from pipeline_io import BASE_DIR, load_jsonl
+from retrieval import hybrid_retrieve
+
+
+DEFAULT_GOLDEN_FILE = BASE_DIR / "eval" / "golden_questions.jsonl"
+DEFAULT_OUTPUT_JSON = BASE_DIR / "eval" / "retrieval_report.json"
+DEFAULT_OUTPUT_MD = BASE_DIR / "eval" / "retrieval_report.md"
+
+
+def url_for_result(result) -> str:
+    return str(
+        result.metadata.get("source_url")
+        or result.metadata.get("document_url")
+        or result.metadata.get("url")
+        or ""
+    )
+
+
+def is_relevant(result, expected_url_contains: list[str]) -> bool:
+    """
+    Relevance semplice e ispezionabile: un risultato è corretto se URL/titolo
+    contengono almeno uno dei pattern dichiarati nel golden set.
+    """
+    if not expected_url_contains:
+        return False
+
+    url = url_for_result(result).lower()
+    text = f"{result.metadata.get('title') or ''} {result.metadata.get('breadcrumb_text') or ''}".lower()
+    haystack = f"{url} {text}"
+
+    return any(needle.lower() in haystack for needle in expected_url_contains)
+
+
+def dcg(relevances: list[int]) -> float:
+    return sum(
+        relevance / math.log2(index + 2)
+        for index, relevance in enumerate(relevances)
+    )
+
+
+def evaluate_query(item: dict[str, Any], k_values: tuple[int, ...]) -> dict[str, Any]:
+    question = str(item["question"])
+    expected = [str(value) for value in item.get("expected_url_contains", [])]
+    max_k = max(k_values)
+
+    if not expected:
+        # Le query senza fonte attesa servono per guardrail/fuori dominio.
+        # Non entrano nelle metriche retrieval perché non hanno un documento gold.
+        return {
+            "id": item.get("id"),
+            "question": question,
+            "expected_url_contains": expected,
+            "skipped": True,
+            "reason": "no_expected_source",
+        }
+
+    results = hybrid_retrieve(question, final_k=max_k)
+    relevances = [1 if is_relevant(result, expected) else 0 for result in results]
+
+    first_relevant_rank = None
+    for index, relevance in enumerate(relevances, start=1):
+        if relevance:
+            first_relevant_rank = index
+            break
+
+    per_k = {}
+    for k in k_values:
+        top_relevances = relevances[:k]
+        ideal_relevances = sorted(relevances, reverse=True)[:k]
+        ideal_dcg = dcg(ideal_relevances)
+        per_k[f"recall@{k}"] = 1.0 if any(top_relevances) else 0.0
+        per_k[f"ndcg@{k}"] = dcg(top_relevances) / ideal_dcg if ideal_dcg else 0.0
+
+    return {
+        "id": item.get("id"),
+        "question": question,
+        "expected_url_contains": expected,
+        "skipped": False,
+        "mrr@10": 1.0 / first_relevant_rank if first_relevant_rank and first_relevant_rank <= 10 else 0.0,
+        **per_k,
+        "top_results": [
+            {
+                "rank": result.rank,
+                "score": result.score,
+                "title": result.metadata.get("title"),
+                "url": url_for_result(result),
+                "relevant": bool(relevance),
+            }
+            for result, relevance in zip(results, relevances, strict=False)
+        ],
+    }
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
+    usable = [row for row in rows if not row.get("skipped")]
+    if not usable:
+        return {}
+
+    metric_names = [
+        key
+        for key in usable[0]
+        if key.startswith("recall@") or key.startswith("ndcg@") or key == "mrr@10"
+    ]
+
+    return {
+        metric: round(sum(float(row.get(metric, 0.0)) for row in usable) / len(usable), 4)
+        for metric in metric_names
+    } | {"evaluated": float(len(usable)), "skipped": float(len(rows) - len(usable))}
+
+
+def run_eval(name: str, reranker_enabled: bool, golden_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Esegue una variante dell'esperimento cambiando solo RERANKER_ENABLED.
+
+    Questo permette un confronto A/B locale: stessa pipeline, stesso indice,
+    una run senza cross-encoder e una con cross-encoder.
+    """
+    previous = os.environ.get("RERANKER_ENABLED")
+    os.environ["RERANKER_ENABLED"] = "true" if reranker_enabled else "false"
+
+    try:
+        rows = [
+            evaluate_query(item, k_values=(5, 10))
+            for item in golden_rows
+        ]
+    finally:
+        if previous is None:
+            os.environ.pop("RERANKER_ENABLED", None)
+        else:
+            os.environ["RERANKER_ENABLED"] = previous
+
+    return {
+        "name": name,
+        "reranker_enabled": reranker_enabled,
+        "summary": summarize(rows),
+        "rows": rows,
+    }
+
+
+def write_markdown(report: dict[str, Any], path: Path) -> None:
+    lines = ["# Retrieval Evaluation", ""]
+
+    for run in report["runs"]:
+        lines.append(f"## {run['name']}")
+        lines.append("")
+        for metric, value in run["summary"].items():
+            lines.append(f"- `{metric}`: {value}")
+        lines.append("")
+
+    if len(report["runs"]) == 2:
+        baseline, reranked = report["runs"]
+        base_recall = baseline["summary"].get("recall@5", 0.0)
+        new_recall = reranked["summary"].get("recall@5", 0.0)
+        delta = new_recall - base_recall
+        lines.append(f"Recall@5 delta: `{delta:.4f}`")
+        lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Valuta il retrieval DIEM su un golden set JSONL.")
+    parser.add_argument("--golden", type=Path, default=DEFAULT_GOLDEN_FILE)
+    parser.add_argument("--output-json", type=Path, default=DEFAULT_OUTPUT_JSON)
+    parser.add_argument("--output-md", type=Path, default=DEFAULT_OUTPUT_MD)
+    parser.add_argument(
+        "--current-only",
+        action="store_true",
+        help="Valuta solo la configurazione corrente invece del confronto baseline/reranker.",
+    )
+    args = parser.parse_args()
+
+    golden_rows = load_jsonl(args.golden)
+
+    if args.current_only:
+        runs = [run_eval("current", os.getenv("RERANKER_ENABLED", "true") != "false", golden_rows)]
+    else:
+        runs = [
+            run_eval("baseline_no_neural_reranker", False, golden_rows),
+            run_eval("neural_reranker", True, golden_rows),
+        ]
+
+    report = {"golden_file": str(args.golden), "runs": runs}
+
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    args.output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_markdown(report, args.output_md)
+
+    for run in runs:
+        print(run["name"], run["summary"])
+
+
+if __name__ == "__main__":
+    main()

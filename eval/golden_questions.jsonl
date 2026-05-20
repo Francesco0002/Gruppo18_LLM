@@ -1,0 +1,65 @@
+{"id":"courses_001","question":"Quali sono i corsi di laurea del DIEM?","expected_url_contains":["/didattica/offerta-formativa"]}
+{"id":"courses_002","question":"Elencami le lauree magistrali del DIEM","expected_url_contains":["/didattica/offerta-formativa"]}
+{"id":"courses_003","question":"Che cosa offre l'offerta formativa del DIEM?","expected_url_contains":["/didattica/offerta-formativa"]}
+{"id":"courses_004","question":"Quali corsi di studio sono disponibili al dipartimento?","expected_url_contains":["/didattica/offerta-formativa"]}
+{"id":"courses_005","question":"Il DIEM ha Ingegneria Informatica magistrale?","expected_url_contains":["ingegneria-informatica-magistrale","/didattica/offerta-formativa"]}
+{"id":"courses_006","question":"Quali corsi L-8 sono collegati al DIEM?","expected_url_contains":["/didattica/offerta-formativa","ingegneria-informatica","ingegneria-dell-informazione-per-la-medicina-digitale"]}
+{"id":"courses_007","question":"Quali corsi LM-32 sono presenti nell'offerta DIEM?","expected_url_contains":["/didattica/offerta-formativa","ingegneria-informatica-magistrale","information-engineering-for-digital-medicine"]}
+{"id":"courses_008","question":"Dove trovo l'offerta formativa DIEM 2025/2026?","expected_url_contains":["/didattica/offerta-formativa"]}
+{"id":"courses_009","question":"Quali corsi di laurea magistrale in inglese offre il DIEM?","expected_url_contains":["/didattica/offerta-formativa","electrical-engineering-for-digital-energy","information-Engineering-for-digital-medicine"]}
+{"id":"courses_010","question":"Ci sono dottorati nella pagina offerta formativa DIEM?","expected_url_contains":["/didattica/offerta-formativa","dottorato"]}
+{"id":"erasmus_001","question":"Quali accordi Erasmus per studio sono disponibili al DIEM?","expected_url_contains":["/international/accordi-erasmus-plus/studio"]}
+{"id":"erasmus_002","question":"Mostrami gli accordi Erasmus per traineeship","expected_url_contains":["/international/accordi-erasmus-plus/traineeship"]}
+{"id":"erasmus_003","question":"Dove sono gli accordi Erasmus Plus del DIEM?","expected_url_contains":["/international/accordi-erasmus-plus"]}
+{"id":"erasmus_004","question":"Quali informazioni ci sono sul bando Erasmus?","expected_url_contains":["/international","erasmus"]}
+{"id":"erasmus_005","question":"Quali università partner Erasmus per studio compaiono?","expected_url_contains":["/international/accordi-erasmus-plus/studio"]}
+{"id":"erasmus_006","question":"Mi servono le scadenze o informazioni per la candidatura Erasmus","expected_url_contains":["/international","erasmus"]}
+{"id":"erasmus_007","question":"Quali accordi Erasmus per docenza sono presenti?","expected_url_contains":["/international/accordi-erasmus-plus/teaching"]}
+{"id":"erasmus_008","question":"Cosa dice la sezione international sugli accordi Erasmus?","expected_url_contains":["/international/accordi-erasmus-plus"]}
+{"id":"erasmus_009","question":"Dove trovo informazioni sul learning agreement Erasmus?","expected_url_contains":["/international","erasmus"]}
+{"id":"erasmus_010","question":"Gli accordi Erasmus per studio includono paesi e università partner?","expected_url_contains":["/international/accordi-erasmus-plus/studio"]}
+{"id":"phd_001","question":"Quali dottorati sono collegati al DIEM?","expected_url_contains":["dottorato","doctoral","DOT18CK8F9","DOT229NLP9","/didattica/offerta-formativa"]}
+{"id":"phd_002","question":"Parlami del PhD in Information Engineering","expected_url_contains":["ingegneria-dell-informazione","doctoral","phd"]}
+{"id":"phd_003","question":"Dove trovo il collegio dei docenti del dottorato?","expected_url_contains":["collegio-dei-docenti","dottorato","DOT18CK8F9"]}
+{"id":"phd_004","question":"Chi è il coordinatore del dottorato in Ingegneria dell'Informazione?","expected_url_contains":["ingegneria-dell-informazione","dottorato","phd"]}
+{"id":"phd_005","question":"Il DIEM ha un dottorato in photovoltaics?","expected_url_contains":["photovoltaics","dottorato","phd"]}
+{"id":"phd_006","question":"Quali studenti sono iscritti al dottorato 2025?","expected_url_contains":["studenti?anno=2025","DOT18CK8F9","DOT229NLP9"]}
+{"id":"phd_007","question":"Quali sono le pagine del dottorato DIEM?","expected_url_contains":["DOT18CK8F9","DOT229NLP9","dottorato"]}
+{"id":"phd_008","question":"Dove sono le informazioni in inglese sul doctoral program?","expected_url_contains":["doctoral","phd","ingegneria-dell-informazione"]}
+{"id":"teachers_001","question":"Chi sono i docenti del DIEM?","expected_url_contains":["/dipartimento/personale"]}
+{"id":"teachers_002","question":"Elencami il personale docente del dipartimento","expected_url_contains":["/dipartimento/personale"]}
+{"id":"teachers_003","question":"Qual è l'email del professor Mario Vento?","expected_url_contains":["/dipartimento/personale"]}
+{"id":"teachers_004","question":"Qual è l'email di Pasquale Foggia?","expected_url_contains":["/dipartimento/personale","docenti.unisa.it"]}
+{"id":"teachers_005","question":"Dove trovo l'elenco dei ricercatori DIEM?","expected_url_contains":["/dipartimento/personale"]}
+{"id":"teachers_006","question":"Chi fa parte degli organi collegiali del DIEM?","expected_url_contains":["/dipartimento/organi-collegiali"]}
+{"id":"teachers_007","question":"Quali professori ordinari sono nel DIEM?","expected_url_contains":["/dipartimento/personale"]}
+{"id":"teachers_008","question":"Cerca informazioni sul docente Francesco Tortorella","expected_url_contains":["/dipartimento/personale","docenti.unisa.it","/dipartimento/presentazione"]}
+{"id":"office_001","question":"Quali sono gli orari di ricevimento del professor Mario Vento?","expected_url_contains":["docenti.unisa.it","/dipartimento/personale"]}
+{"id":"office_002","question":"Quando riceve il professor Pasquale Foggia?","expected_url_contains":["docenti.unisa.it","/dipartimento/personale"]}
+{"id":"office_003","question":"Quali sono gli orari di ricevimento di Antonio Parziale?","expected_url_contains":["docenti.unisa.it/antonio.parziale","/dipartimento/personale"]}
+{"id":"office_004","question":"Vorrei sapere l'orario di ricevimento della professoressa Sabrina Senatore","expected_url_contains":["docenti.unisa.it","/dipartimento/personale"]}
+{"id":"office_005","question":"Quando riceve Giovanni Russo?","expected_url_contains":["docenti.unisa.it/giovanni.russo","/dipartimento/personale"]}
+{"id":"office_006","question":"Mi dici gli orari di ricevimento dei docenti?","expected_url_contains":[]}
+{"id":"office_007","question":"Orario di ricevimento docente DIEM","expected_url_contains":[]}
+{"id":"office_008","question":"Qual è il ricevimento del prof Tortorella?","expected_url_contains":["docenti.unisa.it","/dipartimento/personale"]}
+{"id":"department_001","question":"Dove si trova il DIEM?","expected_url_contains":["/dipartimento","/contatti"]}
+{"id":"department_002","question":"Quali sono i contatti del DIEM?","expected_url_contains":["contatti"]}
+{"id":"department_003","question":"Descrivi il Dipartimento di Ingegneria dell'Informazione ed Elettrica","expected_url_contains":["/dipartimento/presentazione"]}
+{"id":"department_004","question":"Quali laboratori o strutture sono presenti al DIEM?","expected_url_contains":["laboratori","strutture","/dipartimento"]}
+{"id":"department_005","question":"Chi è il direttore del DIEM?","expected_url_contains":["/dipartimento/presentazione","/dipartimento/personale"]}
+{"id":"admission_001","question":"Quali sono i requisiti di accesso per Ingegneria Informatica?","expected_url_contains":["immatricolazioni","modalita-di-accesso","ingegneria-informatica"]}
+{"id":"admission_002","question":"Come iscriversi alla laurea magistrale in Ingegneria Informatica?","expected_url_contains":["immatricolazioni","ingegneria-informatica-magistrale"]}
+{"id":"admission_003","question":"Serve il TOLC per accedere ai corsi DIEM?","expected_url_contains":["immatricolazioni","tolc"]}
+{"id":"admission_004","question":"Dove trovo le modalità di accesso ai corsi DIEM?","expected_url_contains":["immatricolazioni","modalita"]}
+{"id":"documents_001","question":"Mostrami bandi recenti del DIEM","expected_url_contains":["bando","/uploads/","/home/bandi"]}
+{"id":"documents_002","question":"Ci sono graduatorie o bandi pubblicati dal DIEM?","expected_url_contains":["graduatoria","bando","/uploads/","/home/bandi"]}
+{"id":"documents_003","question":"Trova il regolamento del corso di Ingegneria Informatica 2025","expected_url_contains":["__regolamenti-cds/2025","ingegneria-informatica"]}
+{"id":"documents_004","question":"Cerco documenti PDF relativi ai regolamenti dei corsi","expected_url_contains":["__regolamenti-cds","pdf"]}
+{"id":"documents_005","question":"Quali avvisi recenti riguardano la didattica?","expected_url_contains":["news","avvisi","didattica"]}
+{"id":"out_001","question":"Quali corsi offre il Dipartimento di Medicina di Napoli?","expected_url_contains":[]}
+{"id":"out_002","question":"Com'è il meteo a Salerno oggi?","expected_url_contains":[]}
+{"id":"out_003","question":"Chi è il presidente degli Stati Uniti?","expected_url_contains":[]}
+{"id":"out_004","question":"Quali sono i corsi del Dipartimento di Giurisprudenza?","expected_url_contains":[]}
+{"id":"out_005","question":"Scrivimi una poesia sul mare","expected_url_contains":[]}
+{"id":"follow_001","question":"E per il prossimo semestre?","expected_url_contains":["calendari","didattica","semestre"]}
+{"id":"follow_002","question":"Quali sono le scadenze?","expected_url_contains":["scadenze","bando","erasmus","calendario"]}

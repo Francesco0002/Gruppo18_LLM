@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
-
+from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 
 from pipeline_io import load_jsonl
+from reranking import neural_rerank
 from vector_store import CHUNKS_FILE, dense_retrieve, preview_text
+
+
+DEFAULT_BM25_K = int(os.getenv("RETRIEVAL_BM25_K", "80"))
+DEFAULT_DENSE_K = int(os.getenv("RETRIEVAL_DENSE_K", "80"))
+DEFAULT_RERANK_K = int(os.getenv("RETRIEVAL_RERANK_K", "40"))
 
 
 ITALIAN_STOPWORDS = {
@@ -42,6 +50,29 @@ def tokenize(text: str) -> list[str]:
     ]
     
 
+@lru_cache(maxsize=1)
+def load_valid_chunks() -> tuple[dict[str, Any], ...]:
+    chunks = load_jsonl(CHUNKS_FILE)
+    return tuple(
+        chunk
+        for chunk in chunks
+        if chunk.get("chunk_id") and chunk.get("text")
+    )
+
+
+@lru_cache(maxsize=1)
+def load_tokenized_corpus() -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        tuple(tokenize(str(chunk["text"])))
+        for chunk in load_valid_chunks()
+    )
+
+
+@lru_cache(maxsize=1)
+def get_bm25_index() -> BM25Okapi:
+    return BM25Okapi([list(tokens) for tokens in load_tokenized_corpus()])
+
+
 def get_result_url(result: RetrievalResult) -> str:
     return str(
         result.metadata.get("source_url")
@@ -57,6 +88,34 @@ def query_mentions_explicit_year(query: str) -> bool:
     In quel caso non dobbiamo penalizzare o nascondere pagine storiche.
     """
     return bool(re.search(r"\b(19|20)\d{2}\b", query.lower()))
+
+
+def query_wants_pdf_evidence(query: str) -> bool:
+    query_lower = query.lower()
+    return any(
+        keyword in query_lower
+        for keyword in [
+            "bando",
+            "bandi",
+            "regolamento",
+            "regolamenti",
+            "decreto",
+            "verbale",
+            "graduatoria",
+            "pdf",
+            "allegato",
+            "avviso",
+            "concorso",
+            "selezione",
+        ]
+    )
+
+
+def extract_years_from_text(text: str) -> list[int]:
+    return [
+        int(match)
+        for match in re.findall(r"\b(?:19|20)\d{2}\b", text)
+    ]
 
 
 def normalize_url_for_dedup(url: str) -> str:
@@ -364,18 +423,8 @@ def bm25_retrieve(query: str, k: int = 20) -> list[RetrievalResult]:
     """
     Recupera chunk tramite BM25, quindi ricerca lessicale basata su parole chiave.
     """
-    chunks = load_jsonl(CHUNKS_FILE)
-
-    valid_chunks = [
-        chunk
-        for chunk in chunks
-        if chunk.get("chunk_id") and chunk.get("text")
-    ]
-
-    texts = [chunk["text"] for chunk in valid_chunks]
-    tokenized_corpus = [tokenize(text) for text in texts]
-
-    bm25 = BM25Okapi(tokenized_corpus)
+    valid_chunks = load_valid_chunks()
+    bm25 = get_bm25_index()
     query_tokens = tokenize(query)
     scores = bm25.get_scores(query_tokens)
 
@@ -1181,11 +1230,62 @@ def rerank_with_metadata_signals(
     return results
 
 
+def rerank_with_source_freshness(
+    results: list[RetrievalResult],
+    query: str,
+) -> list[RetrievalResult]:
+    """
+    Riduce il rumore dei PDF storici quando la domanda non chiede documenti,
+    bandi, regolamenti o anni specifici.
+    """
+    if query_mentions_explicit_year(query) or query_wants_pdf_evidence(query):
+        return results
+
+    for result in results:
+        url = get_result_url(result).lower()
+        source = str(result.metadata.get("source") or "").lower()
+        text_probe = f"{url} {result.metadata.get('title') or ''}"
+        years = extract_years_from_text(text_probe)
+
+        is_pdf = source == "pdf" or url.endswith(".pdf") or "/uploads/" in url
+
+        # Il corpus contiene molti PDF storici. Sono utili per bandi/regolamenti,
+        # ma rumorosi per domande correnti su corsi, docenti o servizi.
+        if is_pdf:
+            result.score *= 0.45
+
+        # Le pagine ?anno=YYYY sono mantenute per domande storiche; per default
+        # preferiamo la pagina canonica corrente.
+        if re.search(r"(?:^|[?&])(?:anno|year|aa)=(?:19|20)\d{2}", url):
+            result.score *= 0.35
+
+        if years:
+            newest_year = max(years)
+            if newest_year < 2020:
+                result.score *= 0.30
+            elif newest_year < 2024:
+                result.score *= 0.65
+
+        if source == "course_catalogue":
+            result.score *= 1.12
+
+        if source == "html" and "www.diem.unisa.it" in url:
+            result.score *= 1.08
+
+    results.sort(key=lambda result: result.score, reverse=True)
+
+    for rank, result in enumerate(results, start=1):
+        result.rank = rank
+
+    return results
+
+
 def hybrid_retrieve(
     query: str,
-    bm25_k: int = 30,
-    dense_k: int = 30,
+    bm25_k: int = DEFAULT_BM25_K,
+    dense_k: int = DEFAULT_DENSE_K,
     final_k: int = 5,
+    rerank_k: int = DEFAULT_RERANK_K,
 ) -> list[RetrievalResult]:
     """
     Retrieval ibrido:
@@ -1195,21 +1295,33 @@ def hybrid_retrieve(
     """
     retrieval_query = expand_query_for_retrieval(query)
 
-    bm25_results = bm25_retrieve(retrieval_query, k=bm25_k)
-    dense_results = dense_retrieve_wrapped(retrieval_query, k=dense_k)
+    # Candidate generation larga: query originale per precisione sui nomi/codici,
+    # query espansa per richiamo sui domini DIEM più frequenti.
+    result_lists = {
+        "bm25_original": bm25_retrieve(query, k=bm25_k),
+        "dense_original": dense_retrieve_wrapped(query, k=dense_k),
+    }
 
-    hybrid_results = reciprocal_rank_fusion(
-        {
-            "bm25": bm25_results,
-            "dense": dense_results,
-        }
-    )
+    if retrieval_query != query:
+        result_lists["bm25_expanded"] = bm25_retrieve(retrieval_query, k=bm25_k)
+        result_lists["dense_expanded"] = dense_retrieve_wrapped(retrieval_query, k=dense_k)
 
+    hybrid_results = reciprocal_rank_fusion(result_lists)
+
+    # Prima applichiamo segnali deterministici e deduplica; poi il cross-encoder
+    # lavora su un pool più pulito e molto più piccolo.
     hybrid_results = rerank_with_metadata_signals(hybrid_results, query)
+    hybrid_results = rerank_with_source_freshness(hybrid_results, query)
 
     hybrid_results = deduplicate_for_query(
         results=hybrid_results,
         query=query,
+    )
+
+    hybrid_results = neural_rerank(
+        query=query,
+        results=hybrid_results,
+        top_k=rerank_k,
     )
 
     return hybrid_results[:final_k]
@@ -1269,6 +1381,12 @@ def main() -> None:
         default=5,
         help="Numero finale di risultati hybrid da mostrare.",
     )
+    parser.add_argument(
+        "--rerank-k",
+        type=int,
+        default=DEFAULT_RERANK_K,
+        help="Numero di candidati da passare al reranker neurale.",
+    )
 
     args = parser.parse_args()
 
@@ -1277,6 +1395,7 @@ def main() -> None:
         bm25_k=args.bm25_k,
         dense_k=args.dense_k,
         final_k=args.final_k,
+        rerank_k=args.rerank_k,
     )
 
     print_results(args.query, results)

@@ -4,10 +4,12 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from dotenv import load_dotenv
 from groq import Groq
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from pipeline_io import BASE_DIR
 
@@ -16,14 +18,23 @@ load_dotenv(BASE_DIR / ".env", override=True)
 
 
 from retrieval import RetrievalResult, hybrid_retrieve
+from pipeline_io import load_jsonl
+from vector_store import CHUNKS_FILE
 
 
 DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
 
-DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "3"))
+DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "5"))
 DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "6000"))
 
 GROQ_TIMEOUT_SECONDS = int(os.getenv("GROQ_TIMEOUT_SECONDS", "60"))
+GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "3"))
 
 
 @dataclass
@@ -180,18 +191,40 @@ Se la domanda non riguarda il DIEM, i corsi DIEM, i docenti DIEM, i servizi DIEM
 le attività didattiche, di ricerca, internazionali o i documenti ufficiali indicizzati,
 rispondi chiaramente: ""La domanda è fuori dal contesto del DIEM.""
 
-Se la domanda chiede gli orari di ricevimento dei docenti in generale senza indicare
-un docente specifico, chiedi all'utente di specificare il nome del docente.
-
 Rispondi in italiano, in modo chiaro e sintetico.
+Inserisci citazioni inline nel testo, usando i numeri dei documenti: [1], [2].
+Ogni affermazione fattuale specifica deve avere almeno una citazione.
 
 Non aggiungere una sezione "Fonti" nella risposta discorsiva.
-Alla fine della risposta aggiungi obbligatoriamente una riga tecnica nel formato:
-FONTI_USATE: [1, 2]
+Restituisci solo un oggetto JSON valido in questo formato:
+{{
+  "answer": "testo della risposta con citazioni inline",
+  "used_sources": [1, 2],
+  "inline_citations": [1, 2],
+  "no_answer_reason": ""
+}}
 
-Inserisci solo i numeri dei documenti realmente usati per formulare la risposta.
-Se non hai usato nessun documento perché il contesto è insufficiente o la domanda è fuori dominio, scrivi:
-FONTI_USATE: []
+Inserisci in used_sources solo i numeri dei documenti realmente usati.
+Se non hai usato nessun documento perché il contesto è insufficiente o la domanda è fuori dominio,
+usa used_sources: [] e inline_citations: [].
+
+Esempio positivo:
+DOMANDA: Quali corsi di laurea offre il DIEM?
+RISPOSTA JSON:
+{{
+  "answer": "Il DIEM offre corsi di laurea e laurea magistrale elencati nell'offerta formativa, tra cui Ingegneria Informatica e Ingegneria dell'Informazione per la Medicina Digitale [1].",
+  "used_sources": [1],
+  "inline_citations": [1],
+  "no_answer_reason": ""
+}}
+
+Esempio quando il contesto non basta:
+{{
+  "answer": "Non ho trovato questa informazione nelle fonti DIEM indicizzate.",
+  "used_sources": [],
+  "inline_citations": [],
+  "no_answer_reason": "insufficient_context"
+}}
 
 CONTESTO:
 {context}
@@ -201,6 +234,16 @@ DOMANDA UTENTE:
 
 RISPOSTA:
 """.strip()
+
+
+@retry(
+    retry=retry_if_exception_type(Exception),
+    stop=stop_after_attempt(GROQ_MAX_RETRIES),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    reraise=True,
+)
+def create_groq_completion(client: Groq, request_kwargs: dict[str, Any]):
+    return client.chat.completions.create(**request_kwargs)
 
 
 def call_groq(
@@ -220,30 +263,62 @@ def call_groq(
         )
 
     client = Groq(api_key=api_key)
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "stream": False,
+        "timeout": GROQ_TIMEOUT_SECONDS,
+    }
+
+    if GROQ_JSON_MODE:
+        request_kwargs["response_format"] = {"type": "json_object"}
 
     try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            temperature=0.1,
-            top_p=0.9,
-            stream=False,
-            timeout=GROQ_TIMEOUT_SECONDS,
-        )
+        completion = create_groq_completion(client, request_kwargs)
     except Exception as exc:
-        raise RuntimeError(f"Errore durante la chiamata a Groq: {exc}") from exc
+        if "response_format" in request_kwargs:
+            request_kwargs.pop("response_format", None)
+            try:
+                completion = create_groq_completion(client, request_kwargs)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "Non riesco a contattare Groq in questo momento. "
+                    "Riprova tra poco."
+                ) from fallback_exc
+        else:
+            raise RuntimeError(
+                "Non riesco a contattare Groq in questo momento. "
+                "Riprova tra poco."
+            ) from exc
 
     answer = completion.choices[0].message.content
 
     if not answer:
         raise RuntimeError("Groq ha restituito una risposta vuota.")
 
-    return answer.strip()
+    return strip_model_thinking(answer)
+
+
+def strip_model_thinking(answer: str) -> str:
+    """
+    Rimuove i blocchi di ragionamento che alcuni modelli reasoning, come Qwen3,
+    possono restituire nel formato <think>...</think>.
+    """
+    without_thinking = re.sub(
+        r"<think>.*?</think>",
+        "",
+        answer,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    return without_thinking.strip()
 
 
 def format_sources(sources: list[Source]) -> str:
@@ -291,6 +366,35 @@ def parse_used_source_indexes(answer: str) -> tuple[str, list[int]]:
     return cleaned_answer, indexes
 
 
+def parse_model_answer(answer: str) -> tuple[str, list[int]]:
+    """
+    Interpreta prima il JSON mode; se il modello non lo rispetta, usa il
+    vecchio formato FONTI_USATE per compatibilità.
+    """
+    stripped_answer = answer.strip()
+
+    try:
+        payload = json.loads(stripped_answer)
+    except json.JSONDecodeError:
+        return parse_used_source_indexes(stripped_answer)
+
+    if not isinstance(payload, dict):
+        return parse_used_source_indexes(stripped_answer)
+
+    clean_answer = str(payload.get("answer") or "").strip()
+    raw_sources = payload.get("used_sources") or []
+
+    indexes: list[int] = []
+    if isinstance(raw_sources, list):
+        for item in raw_sources:
+            if isinstance(item, int):
+                indexes.append(item)
+            elif isinstance(item, str) and item.strip().isdigit():
+                indexes.append(int(item.strip()))
+
+    return clean_answer, indexes
+
+
 GENERIC_TEACHER_WORDS = {
     "professor",
     "professore",
@@ -307,9 +411,19 @@ GENERIC_TEACHER_WORDS = {
     "ore",
     "quando",
     "dove",
+    "dici",
+    "dire",
+    "dimmi",
+    "sapere",
+    "conoscere",
+    "vorrei",
+    "voglio",
+    "puoi",
+    "mi",
     "quali",
     "qual",
     "sono",
+    "diem",
     "del",
     "della",
     "dei",
@@ -377,6 +491,96 @@ def simple_tokenize(text: str) -> set[str]:
     }
 
 
+@lru_cache(maxsize=1)
+def load_rag_chunks() -> tuple[dict[str, Any], ...]:
+    return tuple(load_jsonl(CHUNKS_FILE))
+
+
+def result_from_chunk(chunk: dict[str, Any], rank: int, score: float) -> RetrievalResult:
+    return RetrievalResult(
+        chunk_id=str(chunk.get("chunk_id") or chunk.get("text_hash") or f"chunk_{rank}"),
+        text=str(chunk.get("text") or ""),
+        metadata=dict(chunk),
+        source="teacher_lookup",
+        rank=rank,
+        score=score,
+    )
+
+
+def teacher_tokens_from_question(question: str) -> set[str]:
+    return simple_tokenize(question)
+
+
+def metadata_tokens_for_chunk(chunk: dict[str, Any]) -> set[str]:
+    metadata_text = " ".join(
+        str(chunk.get(key) or "")
+        for key in ["title", "breadcrumb", "breadcrumb_text", "source_url", "document_url"]
+    )
+    return simple_tokenize(metadata_text)
+
+
+def find_teacher_profile_office_hours(question: str) -> list[RetrievalResult]:
+    teacher_tokens = teacher_tokens_from_question(question)
+    if not teacher_tokens:
+        return []
+
+    matches: list[RetrievalResult] = []
+
+    for chunk in load_rag_chunks():
+        url = str(chunk.get("source_url") or chunk.get("document_url") or "")
+        if "docenti.unisa.it" not in url:
+            continue
+
+        combined_tokens = metadata_tokens_for_chunk(chunk).union(
+            simple_tokenize(str(chunk.get("text") or ""))
+        )
+
+        if not teacher_metadata_matches(teacher_tokens, combined_tokens):
+            continue
+
+        text_lower = str(chunk.get("text") or "").lower()
+        if "ricevimento" not in text_lower:
+            continue
+
+        score = 3.0
+        if url.rstrip("/").endswith("/home"):
+            score += 1.0
+
+        matches.append(result_from_chunk(chunk, rank=len(matches) + 1, score=score))
+
+    matches.sort(key=lambda result: result.score, reverse=True)
+
+    for rank, result in enumerate(matches, start=1):
+        result.rank = rank
+
+    return matches[:3]
+
+
+def find_teacher_personnel_listing(question: str) -> RetrievalResult | None:
+    teacher_tokens = teacher_tokens_from_question(question)
+    if not teacher_tokens:
+        return None
+
+    for chunk in load_rag_chunks():
+        title = str(chunk.get("title") or "")
+        if title != "Dipartimento | Docenti e Personale":
+            continue
+
+        text_tokens = simple_tokenize(str(chunk.get("text") or ""))
+        if teacher_metadata_matches(teacher_tokens, text_tokens):
+            return result_from_chunk(chunk, rank=1, score=1.0)
+
+    return None
+
+
+def retrieve_teacher_office_hours(question: str) -> tuple[list[RetrievalResult], RetrievalResult | None]:
+    profile_results = find_teacher_profile_office_hours(question)
+    if profile_results:
+        return profile_results, None
+
+    return [], find_teacher_personnel_listing(question)
+
+
 def is_office_hours_query(question: str) -> bool:
     question_lower = question.lower()
 
@@ -386,6 +590,8 @@ def is_office_hours_query(question: str) -> bool:
             "ricevimento",
             "orario di ricevimento",
             "orari di ricevimento",
+            "riceve",
+            "ricevono",
         ]
     )
 
@@ -395,21 +601,9 @@ def is_specific_office_hours_query(question: str) -> bool:
 
     asks_office_hours = is_office_hours_query(question_lower)
 
-    has_teacher_reference = any(
-        keyword in question_lower
-        for keyword in [
-            "professor",
-            "professore",
-            "professoressa",
-            "prof.",
-            "prof",
-            "docente",
-        ]
-    )
-
     teacher_name_tokens = simple_tokenize(question_lower)
 
-    return asks_office_hours and has_teacher_reference and bool(teacher_name_tokens)
+    return asks_office_hours and bool(teacher_name_tokens)
 
 
 def is_generic_office_hours_query(question: str) -> bool:
@@ -711,6 +905,51 @@ def answer_question(
             retrieved_chunks=[],
         )
 
+    if is_specific_office_hours_query(question):
+        profile_chunks, personnel_result = retrieve_teacher_office_hours(question)
+
+        if profile_chunks:
+            direct_answer = build_direct_office_hours_answer(
+                question=question,
+                results=profile_chunks,
+            )
+
+            if direct_answer:
+                return RagResponse(
+                    question=question,
+                    answer=f"{direct_answer} [1]",
+                    sources=build_sources(profile_chunks),
+                    retrieved_chunks=profile_chunks,
+                )
+
+            return RagResponse(
+                question=question,
+                answer=(
+                    "Ho trovato la pagina del docente, ma non sono riuscito a estrarre "
+                    "automaticamente gli orari di ricevimento dal testo indicizzato."
+                ),
+                sources=build_sources(profile_chunks),
+                retrieved_chunks=profile_chunks,
+            )
+
+        if personnel_result:
+            return RagResponse(
+                question=question,
+                answer=(
+                    "Ho trovato il docente nell'elenco del personale DIEM, ma non ho trovato "
+                    "nelle fonti indicizzate una pagina personale con gli orari di ricevimento."
+                ),
+                sources=build_sources([personnel_result]),
+                retrieved_chunks=[personnel_result],
+            )
+
+        return RagResponse(
+            question=question,
+            answer="Non ho trovato questo docente nelle fonti DIEM indicizzate.",
+            sources=[],
+            retrieved_chunks=[],
+        )
+
     retrieved_chunks = hybrid_retrieve(
         query=question,
         final_k=final_k,
@@ -774,7 +1013,7 @@ def answer_question(
         model=model,
     )
 
-    clean_answer, used_source_indexes = parse_used_source_indexes(raw_answer)
+    clean_answer, used_source_indexes = parse_model_answer(raw_answer)
 
     all_sources = build_sources(retrieved_chunks)
 

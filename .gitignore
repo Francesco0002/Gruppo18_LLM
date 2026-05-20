@@ -203,6 +203,13 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
+
+# Chainlit runtime-generated translation files
+.chainlit/translations/
+
 # Ruff stuff:
 .ruff_cache/
 

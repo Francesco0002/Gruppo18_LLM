@@ -470,7 +470,8 @@ python src/vector_store.py --query "Quali corsi di laurea offre il DIEM?"
 Responsabilità:
 
 - legge `data/processed/chunks/chunks.jsonl`;
-- converte ogni chunk in un documento LangChain con testo e metadati;
+- filtra i chunk da inserire nel dense index in base a `DENSE_INDEX_PROFILE`;
+- converte i chunk selezionati in documenti LangChain con testo e metadati;
 - genera gli embedding tramite un modello HuggingFace multilingua;
 - indicizza i vettori nel database Chroma;
 - salva il vector store in `data/vectorstore/chroma/`;
@@ -478,6 +479,12 @@ Responsabilità:
 - consente query semantiche di test tramite parametro --query.
 
 Il vector store non deve essere versionato su Git perché è un artefatto generato localmente.
+
+Il profilo dense consigliato è `DENSE_INDEX_PROFILE=core`: indicizza HTML,
+catalogo corsi e pagine docenti/rubrica, più PDF recenti o ad alto valore
+come regolamenti e bandi recenti. Per ogni PDF incluso, `DENSE_MAX_CHUNKS_PER_PDF`
+limita i chunk più informativi da inviare a Chroma. I PDF esclusi restano
+disponibili per BM25 nel retrieval ibrido, ma non appesantiscono Chroma.
 
 ## 7. Retrieval Ibrido
 
@@ -495,7 +502,7 @@ Responsabilità:
 
 - legge i chunk da `data/processed/chunks/chunks.jsonl`;
 - esegue retrieval lessicale tramite BM25;
-- esegue dense retrieval tramite il vector store Chroma creato da `vector_store.py`;
+- esegue dense retrieval tramite il vector store Chroma core creato da `vector_store.py`;
 - combina i risultati dei due retriever tramite Reciprocal Rank Fusion;
 - rimuove risultati ridondanti provenienti dallo stesso URL;
 - applica un rerank leggero basato sui metadati e sul tipo di query;
@@ -529,7 +536,7 @@ python src/chatbot_cli.py
 Comando con modello e numero di chunk personalizzati:
 
 ```bash
-python src/chatbot_cli.py --model llama-3.3-70b-versatile --final-k 3
+python src/chatbot_cli.py --model qwen/qwen3-32b --final-k 3
 ```
 
 Interfaccia grafica Chainlit:
@@ -566,7 +573,7 @@ Le variabili principali sono configurate tramite `.env`:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_MODEL=qwen/qwen3-32b
 GROQ_TIMEOUT_SECONDS=60
 RAG_FINAL_K=3
 RAG_MAX_CONTEXT_CHARS=6000
