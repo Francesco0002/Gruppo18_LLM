@@ -30,6 +30,8 @@ def resolve_href(base_url: str, href: str) -> str:
     href = href.strip()
     if href.startswith("uploads/"):
         href = "/" + href
+    else:
+        href = re.sub(r"^/?[^/?#]+/uploads/", "/uploads/", href, count=1)
     if is_plain_relative_href(href):
         href_first_segment = href.split("/", 1)[0].lower()
         if is_course_numeric_alias_segment(href_first_segment):

@@ -29,3 +29,25 @@ https://corsi.unisa.it/0650107302900001
 https://corsi.unisa.it/0650107303300001
 https://corsi.unisa.it/0650107303300003
 
+# Consigli didattici DIEM: seed diretti per includere commissioni e delegati
+https://cd.unisa.it/ingegneria-dell-informazione-per-la-medicina-digitale
+https://cd.unisa.it/ingegneria-dell-informazione-per-la-medicina-digitale/commissioni
+https://cd.unisa.it/ingegneria-dell-informazione-per-la-medicina-digitale/delegati
+https://cd.unisa.it/ingegneria-informatica
+https://cd.unisa.it/ingegneria-informatica/commissioni
+https://cd.unisa.it/ingegneria-informatica/delegati
+https://cd.unisa.it/electrical-engineering-for-digital-energy
+https://cd.unisa.it/electrical-engineering-for-digital-energy/commissioni
+https://cd.unisa.it/electrical-engineering-for-digital-energy/delegati
+https://cd.unisa.it/information-engineering-for-digital-medicine
+https://cd.unisa.it/information-engineering-for-digital-medicine/commissioni
+https://cd.unisa.it/information-engineering-for-digital-medicine/delegati
+https://cd.unisa.it/ingegneria-informatica-magistrale
+https://cd.unisa.it/ingegneria-informatica-magistrale/commissioni
+https://cd.unisa.it/ingegneria-informatica-magistrale/delegati
+https://cd.unisa.it/ingegneria-dell-informazione
+https://cd.unisa.it/ingegneria-dell-informazione/commissioni
+https://cd.unisa.it/ingegneria-dell-informazione/delegati
+https://cd.unisa.it/photovoltaics
+https://cd.unisa.it/photovoltaics/commissioni
+https://cd.unisa.it/photovoltaics/delegati

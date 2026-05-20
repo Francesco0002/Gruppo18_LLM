@@ -120,9 +120,9 @@ docenti non autorizzati restano fuori scope.
 Le pagine `rubrica.unisa.it/persone?matricola=...` sono indicizzabili solo se
 scoperte da `www.diem.unisa.it/dipartimento/personale`, così i contatti dei
 professori DIEM entrano nel manifest senza aprire la rubrica a persone esterne.
-Il dominio dei consigli didattici (`cd.unisa.it`, ad esempio
-`/ingegneria-informatica/commissioni`) resta fuori scope insieme ai contatti
-elencati da quelle pagine.
+Il dominio dei consigli didattici (`cd.unisa.it`) è attraversabile solo per i
+percorsi corso DIEM configurati, inclusi `commissioni` e `delegati`; i contatti
+elencati da quelle pagine non aprono invece la rubrica a persone esterne.
 
 Le query tecniche restano bloccate di default. L'unica eccezione per `archive`
 è una allowlist esplicita di pagine informative:
@@ -275,15 +275,17 @@ solo se rientra in uno di questi casi:
 3. solo per i PDF con keyword `calendario`, una deroga rescue ancora più stretta
    quando il parent DIEM è una pagina di dettaglio informativa con slug esplicito
    come `calendario-prove-in-itinere` o `appelli-di-recupero`;
-4. materiale internazionale da `international`, come `accordi` ed `erasmus`;
-5. documenti di qualità ed esiti del corso, come `SUA-CDS` e `AlmaLaurea`,
+4. allegati PDF di focus didattici DIEM (`/didattica/focus?id=...`) solo quando
+   il path del PDF contiene lo stesso identificativo del parent;
+5. materiale internazionale da `international`, come `accordi` ed `erasmus`;
+6. documenti di qualità ed esiti del corso, come `SUA-CDS` e `AlmaLaurea`,
    quando sono linkati da corsi già ammessi nello scope;
-6. documento principale di opportunità da `home_bandi`, riconosciuto da segnali
+7. documento principale di opportunità da `home_bandi`, riconosciuto da segnali
    come `bando`, `call`, `premio`, `borsa`, `concorso`, ma non se è solo un
    allegato accessorio come `graduatoria`, `domanda`, `modello`, `locandina`,
    `faq`, `verbale`, `differimento`, `elenco`, `scorrimento`, `presentazione`,
    `comunicato`, `avviso-proroga`;
-7. `decreto` proveniente da una sezione centrale e accompagnato da un contesto
+8. `decreto` proveniente da una sezione centrale e accompagnato da un contesto
    testuale non generico.
 
 Questo include anche le pagine `corsi.unisa.it` già ammesse dallo scope, quando

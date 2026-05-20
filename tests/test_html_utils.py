@@ -44,6 +44,22 @@ class HtmlUtilsTests(unittest.TestCase):
             "https://corsi.unisa.it/0650107303300001/contatti",
         )
 
+    def test_section_prefixed_upload_link_resolves_from_site_root(self) -> None:
+        self.assertEqual(
+            resolve_href(
+                "https://www.diem.unisa.it/didattica/focus?id=1439",
+                "didattica/uploads/rescue/502/1439/ai-applications.pdf",
+            ),
+            "https://www.diem.unisa.it/uploads/rescue/502/1439/ai-applications.pdf",
+        )
+        self.assertEqual(
+            resolve_href(
+                "https://www.diem.unisa.it/didattica/focus?id=1439",
+                "/didattica/uploads/rescue/502/1439/ai-applications.pdf",
+            ),
+            "https://www.diem.unisa.it/uploads/rescue/502/1439/ai-applications.pdf",
+        )
+
     def test_rescue_relative_plain_link_with_encoded_padding_uses_decoded_course(self) -> None:
         base_url = (
             "https://corsi.unisa.it/unisa-rescue-page/dettaglio/"

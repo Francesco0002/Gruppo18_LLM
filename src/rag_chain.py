@@ -18,7 +18,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 from retrieval import RetrievalResult, hybrid_retrieve
 
 
-DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
 
 DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "3"))
 DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "6000"))

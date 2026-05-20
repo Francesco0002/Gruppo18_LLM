@@ -309,16 +309,31 @@ class DiscoveryControlTests(unittest.TestCase):
         self.assertFalse(index_ok)
         self.assertEqual(index_reason, "scope_directory")
 
-    def test_teaching_council_pages_are_out_of_scope_even_if_domain_is_allowed(self) -> None:
+    def test_teaching_council_pages_are_scoped_to_configured_diem_courses(self) -> None:
         config = base_config()
         config["crawler"]["allowed_domains"].append("cd.unisa.it")
         config["crawler"]["per_domain_limits"]["cd.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = [
+            "ingegneria-informatica",
+            "electrical-engineering-for-digital-energy",
+        ]
+
+        for url in (
+            "https://cd.unisa.it/ingegneria-informatica",
+            "https://cd.unisa.it/ingegneria-informatica/commissioni",
+            "https://cd.unisa.it/ingegneria-informatica/delegati",
+            "https://cd.unisa.it/electrical-engineering-for-digital-energy/commissioni",
+            "https://cd.unisa.it/electrical-engineering-for-digital-energy/delegati",
+        ):
+            traverse_ok, traverse_reason = can_traverse_url(url, config)
+            index_ok, index_reason = can_index_url(url, config)
+            self.assertTrue(traverse_ok, traverse_reason)
+            self.assertTrue(index_ok, index_reason)
 
         ok, reason = can_traverse_url(
-            "https://cd.unisa.it/ingegneria-informatica/commissioni",
+            "https://cd.unisa.it/giurisprudenza/commissioni",
             config,
         )
-
         self.assertFalse(ok)
         self.assertEqual(reason, "scope_teaching_council")
 
@@ -592,6 +607,37 @@ class DiscoveryControlTests(unittest.TestCase):
             "allowed_informative_calendar_document",
         )
         self.assertEqual(generic_records[0]["status"], "robots_denied")
+
+    def test_didactic_focus_pdf_attachments_are_allowed_when_they_match_parent_id(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/502/1439/ai-applications.pdf",
+                        "text": "AI APPLICATIONS PDF Altri formati",
+                    },
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/502/9999/ai-applications.pdf",
+                        "text": "AI APPLICATIONS PDF Altri formati",
+                    },
+                ],
+                "https://www.diem.unisa.it/didattica/focus?id=1439",
+                2,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual(records[0]["status"], "pending_download")
+        self.assertEqual(
+            records[0]["pdf_download_decision"],
+            "allowed_didactic_focus_document",
+        )
+        self.assertEqual(records[1]["status"], "robots_denied")
 
     def test_international_program_pdf_is_allowed_from_international_section(self) -> None:
         class DenyRobots:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 
 # Documenti stabili che arricchiscono la knowledge base anche fuori dalle news.
@@ -192,6 +192,29 @@ def is_informative_calendar_parent(parent_url: str) -> bool:
     )
 
 
+def query_value(url: str, name: str) -> str | None:
+    """Restituisce il primo valore di una query, se presente."""
+    for param_name, value in parse_qsl(urlparse(url).query, keep_blank_values=True):
+        if param_name.lower() == name:
+            return value
+    return None
+
+
+def is_didactic_focus_attachment(pdf_url: str, parent_url: str) -> bool:
+    """True per PDF allegati alla stessa pagina /didattica/focus?id=..."""
+    parent = urlparse(parent_url)
+    pdf = urlparse(pdf_url)
+    focus_id = query_value(parent_url, "id")
+    if not focus_id:
+        return False
+    return (
+        parent.netloc.lower() == "www.diem.unisa.it"
+        and parent.path.rstrip("/").lower() == "/didattica/focus"
+        and pdf.netloc.lower() == "www.diem.unisa.it"
+        and f"/{focus_id}/" in pdf.path
+    )
+
+
 def pdf_download_exception(
     pdf_url: str,
     parent_url: str,
@@ -224,6 +247,10 @@ def pdf_download_exception(
         and keywords == ["calendario"]
         and is_informative_calendar_parent(parent_url)
     )
+    didactic_focus_document = (
+        pdf_domain in allowed_pdf_domains
+        and is_didactic_focus_attachment(pdf_url, parent_url)
+    )
     international_program_document = (
         pdf_domain in allowed_pdf_domains
         and section == "international"
@@ -251,6 +278,8 @@ def pdf_download_exception(
         return True, section, keywords, "allowed_teaching_operations_document"
     if informative_calendar_document:
         return True, section, keywords, "allowed_informative_calendar_document"
+    if didactic_focus_document:
+        return True, section, keywords, "allowed_didactic_focus_document"
     if international_program_document:
         return True, section, keywords, "allowed_international_program_document"
     if course_evidence_document:

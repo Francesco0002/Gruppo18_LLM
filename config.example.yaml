@@ -18,12 +18,14 @@ crawler:
     - docenti.unisa.it
     - corsi.unisa.it
     - rubrica.unisa.it
+    - cd.unisa.it
 
   # Domini in cui è permesso scoprire (e in seguito scaricare) PDF.
   pdf_allowed_domains:
     - www.diem.unisa.it
     - docenti.unisa.it
     - corsi.unisa.it
+    - cd.unisa.it
     - www.unisa.it
     - web.unisa.it
 
@@ -39,6 +41,7 @@ crawler:
     docenti.unisa.it: 200
     corsi.unisa.it: 150
     rubrica.unisa.it: 200
+    cd.unisa.it: 150
     www.unisa.it: 50
     web.unisa.it: 50
 

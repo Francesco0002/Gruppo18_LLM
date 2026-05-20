@@ -5,6 +5,7 @@ Le regole riflettono lo scope dell'assignment:
 - pagine sotto www.diem.unisa.it;
 - profili docenti DIEM sotto docenti.unisa.it, autorizzati dal personale DIEM;
 - corsi DIEM sotto corsi.unisa.it, riconosciuti da percorsi/codici in config;
+- consigli didattici DIEM sotto cd.unisa.it, riconosciuti dai percorsi corso;
 - PDF referenziati da pagine in scope.
 - query parametriche bloccate di default, con allowlist puntuali per archivi
   informativi verificati.
@@ -17,7 +18,7 @@ Tabella delle regole principali:
 | rubrica.unisa.it      | Solo contatti scoperti dal personale DIEM.                 |
 | docenti.unisa.it      | Solo profili whitelistati dal personale DIEM.              |
 | corsi.unisa.it        | Solo percorsi/codici DIEM configurati.                     |
-| cd.unisa.it           | Escluso: consigli didattici non sono fonti DIEM.           |
+| cd.unisa.it           | Solo consigli didattici dei corsi DIEM configurati.        |
 | uploads PDF           | Rilevati; scaricati solo se robots.txt lo permette.        |
 | query `archive`        | Solo valori allowlistati per news/eventi DIEM.              |
 """
@@ -459,6 +460,24 @@ def course_rescue_page_has_allowed_identifier(url: str, config: dict) -> bool:
     )
 
 
+def teaching_council_has_allowed_identifier(url: str, config: dict) -> bool:
+    """True per consigli didattici relativi ai corsi DIEM configurati."""
+    first_segment = first_path_segment(url)
+    allowed_course_paths = configured_course_paths(config)
+    allowed_codes = {
+        str(code).lower()
+        for code in config_list(config, "scope", "allowed_course_codes")
+    }
+    allowed_code_prefixes = {
+        match.group(1)
+        for code in allowed_codes
+        if (match := re.match(r"^(\d{5})(?:[a-z]|$)", code))
+    }
+    return first_segment in (
+        allowed_course_paths | allowed_codes | allowed_code_prefixes
+    )
+
+
 def is_malformed_course_rescue_detail_url(url: str, config: dict) -> bool:
     """True per rescue URL nate da link relativi appesi al dettaglio corrente."""
     parsed = urlparse(url)
@@ -500,10 +519,19 @@ def is_known_scope_source(source_url: str | None, config: dict) -> bool:
     domain = domain_of(source_url)
     teacher_domain = scope_value(config, "teacher_domain", "docenti.unisa.it")
     course_domain = scope_value(config, "course_domain", "corsi.unisa.it")
+    teaching_council_domain = scope_value(
+        config,
+        "teaching_council_domain",
+        "cd.unisa.it",
+    )
 
     return (
         is_diem_url(source_url, config)
         or domain == teacher_domain
+        or (
+            domain == teaching_council_domain
+            and teaching_council_has_allowed_identifier(source_url, config)
+        )
         or (
             domain == course_domain
             and (
@@ -616,6 +644,8 @@ def is_in_scope_url(
 
     teaching_council_domain = scope_value(config, "teaching_council_domain", "cd.unisa.it")
     if domain == teaching_council_domain:
+        if teaching_council_has_allowed_identifier(url, config):
+            return True, "ok"
         return False, "scope_teaching_council"
 
     if is_diem_url(url, config):
