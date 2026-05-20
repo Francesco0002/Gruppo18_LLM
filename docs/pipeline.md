@@ -25,8 +25,10 @@ retrieval.py
   -> BM25 + dense retrieval + fusione RRF dei risultati
 rag_chain.py
   -> prompt RAG + generazione risposta tramite API Groq
-chatbot.py
+chatbot_cli.py
   -> interfaccia CLI per interrogare il chatbot
+app.py
+  -> interfaccia grafica Chainlit
 ```
 
 ## 1. Discovery
@@ -519,13 +521,19 @@ Questa fase non genera ancora la risposta finale: produce i chunk più rilevanti
 Comando:
 
 ```bash
-python src/chatbot.py
+python src/chatbot_cli.py
 ```
 
 Comando con modello e numero di chunk personalizzati:
 
 ```bash
-python src/chatbot.py --model llama-3.3-70b-versatile --final-k 3
+python src/chatbot_cli.py --model llama-3.3-70b-versatile --final-k 3
+```
+
+Interfaccia grafica Chainlit:
+
+```bash
+chainlit run src/app.py -w
 ```
 
 Responsabilità:

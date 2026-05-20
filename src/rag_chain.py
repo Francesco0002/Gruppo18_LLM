@@ -822,12 +822,20 @@ def answer_question_as_text(
     model: str = DEFAULT_GROQ_MODEL,
 ) -> str:
     """
-    Utility comoda per CLI: restituisce risposta già formattata con fonti.
+    Utility comoda per CLI/Chainlit: restituisce risposta già formattata.
+
+    Se non ci sono fonti, mostra solo la risposta.
+    Questo evita righe inutili come:
+    "Fonti: nessuna fonte disponibile."
+    per fuori dominio, domande generiche o contesto insufficiente.
     """
     response = answer_question(
         question=question,
         final_k=final_k,
         model=model,
     )
+
+    if not response.sources:
+        return response.answer
 
     return f"{response.answer}\n\n{format_sources(response.sources)}"

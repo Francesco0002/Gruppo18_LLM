@@ -22,8 +22,12 @@ src/
   vector_store.py         Chunk -> embedding -> Chroma vector store
   retrieval.py            Retrieval ibrido BM25 + dense + RRF
   rag_chain.py            Pipeline RAG: retrieval + prompt + chiamata LLM
-  chatbot.py              Chatbot CLI per interrogare il sistema
+  app.py                  Interfaccia grafica Chainlit
+  chatbot_cli.py          Chatbot CLI da terminale
   legacy/                 Prototipi non più usati
+
+.chainlit/              Configurazione interfaccia Chainlit
+public/                 Asset UI Chainlit: logo, favicon, avatar
 
 data/                     Dati locali e output del crawl
 docs/pipeline.md          Dettaglio della pipeline dati
@@ -109,13 +113,19 @@ python src/retrieval.py --query "Quali corsi di laurea offre il DIEM?"
 Chatbot RAG da terminale:
 
 ```bash
-python src/chatbot.py
+python src/chatbot_cli.py
 ```
 
 Esempio con modello Groq e numero di chunk personalizzato:
 
 ```bash
-python src/chatbot.py --model llama-3.3-70b-versatile --final-k 3
+python src/chatbot_cli.py --model llama-3.3-70b-versatile --final-k 3
+```
+
+Interfaccia grafica Chainlit:
+
+```bash
+chainlit run src/app.py -w
 ```
 
 Ripartenza pulita:
@@ -158,9 +168,10 @@ Il modulo `src/rag_chain.py` implementa la pipeline RAG completa:
 - interpreta gli indici dei documenti usati dal modello;
 - restituisce risposta e fonti utilizzate.
 
-Il modulo `src/chatbot.py` fornisce una semplice interfaccia da terminale per interrogare il chatbot.
+Il modulo `src/chatbot_cli.py` fornisce una semplice interfaccia da terminale per interrogare il chatbot.
 La generazione è vincolata al contesto recuperato: se le fonti non contengono informazioni sufficienti,
 il chatbot deve dichiararlo invece di inventare una risposta.
+Il modulo `src/app.py` fornisce l’interfaccia grafica Chainlit.
 
 `config.yaml`, `.env`, virtual environment, file in `data/`, indici e API key
 non devono essere versionati su Git.
