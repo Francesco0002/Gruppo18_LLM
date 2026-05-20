@@ -22,7 +22,7 @@ DiscoveryStatus = Literal[
     "non_html",
 ]
 DiscoveryType = Literal["html", "pdf", "other", "unknown"]
-ProcessedSource = Literal["html", "pdf"]
+ProcessedSource = Literal["html", "pdf", "course_catalogue"]
 ProcessedStatus = Literal["ok", "failed", "too_large"]
 CleanStatus = Literal["ok", "empty", "warning"]
 
@@ -104,3 +104,11 @@ class ProcessedRecord(TypedDict, total=False):
     duplicate_of: str | None
     duplicate_of_url: str | None
     duplicate_reason: str
+    course_catalogue_kind: str
+    course_catalogue_year: str
+    course_catalogue_teaching_year: str
+    course_catalogue_course_id: str
+    course_catalogue_teaching_id: str
+    course_catalogue_teaching_code: str
+    course_catalogue_cds_cod: str
+    course_catalogue_codicione: str

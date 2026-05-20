@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import httpx
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 from discovery_fetch import DomainRateLimiter, RobotsCache, fetch_discovery_candidate
 from discovery_io import make_record

@@ -22,6 +22,7 @@ from discover import (  # noqa: E402
 from discovery_io import load_discovery_state, save_discovery_state  # noqa: E402
 from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState  # noqa: E402
 from discovery_processor import make_linked_pdf_records  # noqa: E402
+from url_filters import can_index_url, can_traverse_url  # noqa: E402
 
 
 def base_config() -> dict:
@@ -56,6 +57,284 @@ class DiscoveryControlTests(unittest.TestCase):
             [(item.url, item.origin_seed) for item in state.queue],
             [(seed_a, seed_a), (seed_b, seed_b)],
         )
+
+    def test_configured_course_numeric_aliases_are_traversable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_numeric_ids"] = ["0650106200800001"]
+
+        self.assertTrue(
+            can_traverse_url("https://corsi.unisa.it/0650106200800001", config)[0]
+        )
+        self.assertTrue(
+            can_traverse_url(
+                "https://corsi.unisa.it/0650106200800001/didattica/orari",
+                config,
+            )[0]
+        )
+        self.assertFalse(
+            can_traverse_url("https://corsi.unisa.it/0650106201000001", config)[0]
+        )
+
+    def test_course_alias_links_from_in_scope_course_pages_are_traversable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["ingegneria-informatica"]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/0650106200800001/didattica/orari",
+            config,
+            {"discovered_from": "https://corsi.unisa.it/ingegneria-informatica"},
+        )
+
+        self.assertTrue(ok, reason)
+
+    def test_short_numeric_course_codes_configured_by_full_code_are_traversable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_codes"] = ["06128L-8", "06233LM-28"]
+
+        for url in (
+            "https://corsi.unisa.it/06128/immatricolazioni",
+            "https://corsi.unisa.it/06233",
+        ):
+            ok, reason = can_traverse_url(url, config)
+            self.assertTrue(ok, reason)
+
+    def test_course_sitemap_query_is_traversable_but_not_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["ingegneria-informatica"]
+        url = "https://corsi.unisa.it/ingegneria-informatica?sitemap"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+        index_ok, index_reason = can_index_url(url, config)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "noisy_query")
+
+    def test_course_rescue_detail_is_traversable_when_encoded_course_is_allowed(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = [
+            "ingegneria-dell-informazione-per-la-medicina-digitale"
+        ]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/unisa-rescue-page/dettaglio/"
+            "url/L2luZ2VnbmVyaWEtZGVsbC1pbmZvcm1hemlvbmUtcGVyLWxhLW1lZGljaW5hLWRpZ2l0YWxl/"
+            "id/1540/module/501/row/29862",
+            config,
+        )
+
+        self.assertTrue(ok, reason)
+
+    def test_course_rescue_detail_with_percent_encoded_padding_is_traversable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_numeric_ids"] = ["0650106200800001"]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/unisa-rescue-page/dettaglio/"
+            "url/LzA2NTAxMDYyMDA4MDAwMDE%3D/id/1540/module/501/row/29903",
+            config,
+        )
+
+        self.assertTrue(ok, reason)
+
+    def test_malformed_course_rescue_detail_from_relative_menu_is_blocked(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = [
+            "ingegneria-dell-informazione-per-la-medicina-digitale"
+        ]
+        config["scope"]["allowed_course_numeric_ids"] = ["0650106200800003"]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/unisa-rescue-page/dettaglio/"
+            "url/L2luZ2VnbmVyaWEtZGVsbC1pbmZvcm1hemlvbmUtcGVyLWxhLW1lZGljaW5hLWRpZ2l0YWxl/"
+            "id/1540/module/0650106200800003/0650106200800003/0650106200800003/contatti",
+            config,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "malformed_course_rescue")
+
+    def test_malformed_course_rescue_search_from_relative_menu_is_blocked(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["ingegneria-informatica"]
+        config["scope"]["allowed_course_numeric_ids"] = ["0650107303300001"]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/unisa-rescue-page/search/id/2364/"
+            "url/LzA2MjI3L2VuL3RlYWNoaW5nLWZhY2lsaXRpZXM=/"
+            "calendario-occupazione-spazi/calendario-occupazione-spazi/"
+            "0650107303300001/contatti",
+            config,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "malformed_course_rescue")
+
+    def test_bandi_structure_filter_keeps_only_diem_structure(self) -> None:
+        config = base_config()
+
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=139&struttura=300638",
+            config,
+        )
+        self.assertTrue(ok, reason)
+
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=139&struttura=300400",
+            config,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "blocked_query")
+
+    def test_ricerca_focus_id_is_traversable(self) -> None:
+        config = base_config()
+
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/ricerca/focus?id=1234",
+            config,
+        )
+        self.assertTrue(ok, reason)
+
+        # 'anno' su /ricerca/focus deve rimanere bloccato
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/ricerca/focus?anno=2026",
+            config,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "blocked_query")
+
+    def test_conto_terzi_progetto_is_traversable(self) -> None:
+        config = base_config()
+
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/terza-missione/trasferimento-tecnologico/conto-terzi?progetto=66770",
+            config,
+        )
+        self.assertTrue(ok, reason)
+
+        # progetto su altri path generici (es: /home) deve rimanere bloccato
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/home?progetto=66770",
+            config,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "blocked_query")
+
+    def test_doctoral_course_news_archive_is_traversable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["DOT18CK8F9"]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/DOT18CK8F9/news?archive=1",
+            config,
+        )
+
+        self.assertTrue(ok, reason)
+
+    def test_english_pages_are_filtered_from_italian_corpus(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["ingegneria-informatica"]
+
+        for url in (
+            "https://www.diem.unisa.it/en/department",
+            "https://corsi.unisa.it/ingegneria-informatica/en/news",
+            "https://corsi.unisa.it/0650107302900001/en/news",
+            "https://corsi.unisa.it/DOT18CK8F9/en/news",
+            "https://corsi.unisa.it/ingegneria-informatica/news?lang=en",
+        ):
+            ok, reason = can_traverse_url(url, config)
+            self.assertFalse(ok)
+            self.assertEqual(reason, "language")
+
+    def test_allowed_teacher_profile_remains_traversable_without_source_context(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "seed",
+            "allowed_teacher_profiles": {"antonio.parziale"},
+        }
+
+        ok, reason = can_traverse_url(
+            "https://docenti.unisa.it/antonio.parziale",
+            config,
+            context,
+        )
+
+        self.assertTrue(ok, reason)
+
+    def test_diem_directory_contact_is_indexable_only_from_personnel_page(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("rubrica.unisa.it")
+        config["crawler"]["per_domain_limits"]["rubrica.unisa.it"] = 10
+        url = "https://rubrica.unisa.it/persone?matricola=004491"
+        personnel_context = {
+            "discovered_from": "https://www.diem.unisa.it/dipartimento/personale"
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config, personnel_context)
+        index_ok, index_reason = can_index_url(url, config, personnel_context)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+        course_context = {
+            "discovered_from": "https://cd.unisa.it/ingegneria-informatica/commissioni"
+        }
+        traverse_ok, traverse_reason = can_traverse_url(url, config, course_context)
+        index_ok, index_reason = can_index_url(url, config, course_context)
+
+        self.assertFalse(traverse_ok)
+        self.assertEqual(traverse_reason, "scope_directory")
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "scope_directory")
+
+    def test_teaching_council_pages_are_out_of_scope_even_if_domain_is_allowed(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("cd.unisa.it")
+        config["crawler"]["per_domain_limits"]["cd.unisa.it"] = 10
+
+        ok, reason = can_traverse_url(
+            "https://cd.unisa.it/ingegneria-informatica/commissioni",
+            config,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "scope_teaching_council")
+
+    def test_course_rescue_detail_linked_from_allowed_course_is_traversable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["ingegneria-informatica"]
+
+        ok, reason = can_traverse_url(
+            "https://corsi.unisa.it/unisa-rescue-page/dettaglio/id/1540/module/501/row/29862",
+            config,
+            {"discovered_from": "https://corsi.unisa.it/ingegneria-informatica"},
+        )
+
+        self.assertTrue(ok, reason)
 
     def test_fair_bfs_order_round_robins_seed_branches_within_depth(self) -> None:
         seed_a = "https://www.diem.unisa.it/a"
@@ -502,6 +781,38 @@ class DiscoveryControlTests(unittest.TestCase):
         self.assertEqual(state.queued, {item.url})
         self.assertEqual(skip_counts, {"domain_limit": 1})
         self.assertEqual(skip_counts_by_depth, {("domain_limit", 4): 1})
+
+    def test_terminal_forced_reexpansion_is_removed_from_backlog(self) -> None:
+        item = CrawlItem(
+            "https://www.diem.unisa.it/home/bandi?struttura=000000",
+            1,
+            "https://www.diem.unisa.it/home/bandi",
+            force_revisit=True,
+        )
+        state = CrawlState(
+            queue=deque([item]),
+            queued={item.url},
+            visited=set(),
+            seen_documents=set(),
+            domain_counts=Counter(),
+            expansion_backlog={item.url: item},
+        )
+        skip_counts: Counter[str] = Counter()
+        skip_counts_by_depth: Counter[tuple[str, int]] = Counter()
+
+        batch = take_batch(
+            state,
+            base_config(),
+            skip_counts=skip_counts,
+            skip_counts_by_depth=skip_counts_by_depth,
+        )
+
+        self.assertEqual(batch, [])
+        self.assertEqual(list(state.queue), [])
+        self.assertEqual(state.queued, set())
+        self.assertEqual(state.expansion_backlog, {})
+        self.assertEqual(skip_counts, {"blocked_query": 1})
+        self.assertEqual(skip_counts_by_depth, {("blocked_query", 1): 1})
 
     def test_depth_increase_requeues_boundary_pages_for_forced_revisit(self) -> None:
         boundary = CrawlItem("https://www.diem.unisa.it/a", 1, "parent")

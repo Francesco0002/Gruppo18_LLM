@@ -69,12 +69,54 @@ crawler:
     header: false
     footer: false
 
+course_catalogue:
+  # Il catalogo Cineca e' una SPA Angular: questi contenuti vengono ingeriti
+  # dagli endpoint JSON invece che dal crawler HTML.
+  enabled: true
+  domain: unisa.coursecatalogue.cineca.it
+  course_entries:
+    - year: "2023"
+      course_id: "500189"  # Ingegneria Informatica
+    - year: "2023"
+      course_id: "500639"  # Ingegneria dell'Informazione per la Medicina Digitale
+    - year: "2023"
+      course_id: "500191"  # Ingegneria Informatica magistrale
+    - year: "2023"
+      course_id: "500648"  # Information Engineering for Digital Medicine
+    - year: "2023"
+      course_id: "500679"  # Electrical Engineering for Digital Energy
+    - year: "2024"
+      course_id: "500189"  # Ingegneria Informatica
+    - year: "2024"
+      course_id: "500639"  # Ingegneria dell'Informazione per la Medicina Digitale
+    - year: "2024"
+      course_id: "500191"  # Ingegneria Informatica magistrale
+    - year: "2024"
+      course_id: "500648"  # Information Engineering for Digital Medicine
+    - year: "2024"
+      course_id: "500679"  # Electrical Engineering for Digital Energy
+    - year: "2025"
+      course_id: "500853"  # Ingegneria Informatica
+    - year: "2025"
+      course_id: "500838"  # Ingegneria dell'Informazione per la Medicina Digitale
+    - year: "2025"
+      course_id: "500854"  # Ingegneria Informatica magistrale
+    - year: "2025"
+      course_id: "500878"  # Information Engineering for Digital Medicine
+    - year: "2025"
+      course_id: "500879"  # Electrical Engineering for Digital Energy
+  fetch_teaching_details: true
+  skip_recent_days: 7
+  timeout: 20
+
 scope:
   # Domini gestiti come "DIEM-aware".
   diem_domain: www.diem.unisa.it
   teacher_domain: docenti.unisa.it
   course_domain: corsi.unisa.it
   directory_domain: rubrica.unisa.it
+  teaching_council_domain: cd.unisa.it
+  course_catalogue_domain: unisa.coursecatalogue.cineca.it
 
   # Percorsi corso ammessi per corsi.unisa.it/<percorso-corso>/...
   # Solo i corsi DIEM elencati qui vengono attraversati: niente match
@@ -87,6 +129,8 @@ scope:
     - ingegneria-informatica-magistrale
     - ingegneria-dell-informazione
     - photovoltaics
+    - DOT18CK8F9
+    - DOT229NLP9
 
   # Codici corso DIEM riconosciuti nel path (oltre ai percorsi corso).
   # Quotare i codici puramente numerici per evitare che YAML li
@@ -104,6 +148,15 @@ scope:
     - 06233LM-28
     - 06232LM-32
     - 06227LM-32
+
+  # Alias numerici usati da corsi.unisa.it per pagine operative come orari,
+  # calendario, piani di studio e versioni inglesi dei corsi DIEM.
+  allowed_course_numeric_ids:
+    - "0650106200800001"
+    - "0650106200800003"
+    - "0650107302900001"
+    - "0650107303300001"
+    - "0650107303300003"
 
 paths:
   # Path relativi alla root del progetto.

@@ -5,8 +5,9 @@ Questo script coordina:
 1. discovery degli URL
 2. conversione HTML in Markdown
 3. estrazione PDF in Markdown
-4. marcatura dei documenti duplicati nel manifest processed
-5. generazione di un report compatto in data/processed/stats.json e nello
+4. ingest CourseCatalogue/Cineca via API JSON
+5. marcatura dei documenti duplicati nel manifest processed
+6. generazione di un report compatto in data/processed/stats.json e nello
    storico run, con discovery del run, copertura per depth, estrazione e stato
    cumulativo del corpus processed
 
@@ -21,6 +22,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from course_catalogue import run_course_catalogue_ingest
 from discover import run_discovery
 from discovery_io import load_config, project_path, validate_config
 from extract_pdf import run_extract_pdf_async
@@ -59,6 +61,7 @@ from ingest_stats import (
     suspicious_allowed_attachment_hints,
     write_stats,
 )
+from pdf_backfill import backfill_linked_pdfs_from_processed_html
 from pipeline_io import latest_record_indexes, load_jsonl, write_jsonl_atomic
 from pipeline_types import ProcessedRecord
 from scrape import run_scrape
@@ -105,7 +108,10 @@ def mark_duplicate_documents(
 
     def duplicate_priority(index: int) -> tuple[int, _dt, int]:
         record = updated_records[index]
-        source_priority = {"html": 0, "pdf": 1}.get(str(record.get("source")), 2)
+        source_priority = {"html": 0, "course_catalogue": 1, "pdf": 2}.get(
+            str(record.get("source")),
+            3,
+        )
         crawled_str = str(record.get("last_crawled", ""))
         try:
             crawled_dt = _dt.fromisoformat(crawled_str.replace("Z", "+00:00"))
@@ -149,13 +155,22 @@ async def run_pipeline_steps(config: dict) -> dict[str, dict]:
     """Esegue gli step pesanti della pipeline e raccoglie le statistiche."""
     step_stats: dict[str, dict] = {}
 
-    print("\n[1/5] Discovery")
+    print("\n[1/6] Discovery")
     step_stats["discover"] = await run_discovery(config)
 
-    print("\n[2/5] Scrape HTML")
+    print("\n[2/6] Scrape HTML")
     step_stats["scrape"] = await run_scrape()
 
-    print("\n[3/5] Estrazione PDF")
+    print("\n[3/7] Backfill PDF linkati")
+    step_stats["pdf_backfill"] = backfill_linked_pdfs_from_processed_html(config)
+    backfill_stats = step_stats["pdf_backfill"]
+    print(
+        "Backfill PDF: "
+        f"html_scansionati={backfill_stats['scanned_html']}, "
+        f"pdf_aggiunti={backfill_stats['added_pdf_records']}"
+    )
+
+    print("\n[4/7] Estrazione PDF")
     step_stats["extract_pdf"] = await run_extract_pdf_async(config)
     pdf_stats = step_stats["extract_pdf"]
     print(
@@ -166,6 +181,18 @@ async def run_pipeline_steps(config: dict) -> dict[str, dict]:
         f"estratti_ok={pdf_stats['extracted_ok']}, "
         f"falliti={pdf_stats['failed']}, "
         f"troppo_grandi={pdf_stats['too_large']}"
+    )
+
+    print("\n[5/7] CourseCatalogue")
+    step_stats["course_catalogue"] = await run_course_catalogue_ingest(config)
+    cc_stats = step_stats["course_catalogue"]
+    print(
+        "CourseCatalogue: "
+        f"abilitato={cc_stats['enabled']}, "
+        f"corsi_configurati={cc_stats['courses_configured']}, "
+        f"documenti_ok={cc_stats['processed_ok']}, "
+        f"falliti={cc_stats['failed']}, "
+        f"schede_insegnamento_fallite={cc_stats.get('teaching_detail_failed', 0)}"
     )
 
     return step_stats
@@ -187,8 +214,8 @@ async def run_ingest(stats_only: bool = False) -> dict:
     else:
         step_stats = await run_pipeline_steps(config)
 
-    duplicate_label = "[1/2]" if stats_only else "[4/5]"
-    stats_label = "[2/2]" if stats_only else "[5/5]"
+    duplicate_label = "[1/2]" if stats_only else "[6/7]"
+    stats_label = "[2/2]" if stats_only else "[7/7]"
 
     print(f"\n{duplicate_label} Marcatura documenti duplicati")
     manifest_records = load_jsonl(manifest_path)

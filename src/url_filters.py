@@ -14,17 +14,21 @@ Tabella delle regole principali:
 | Dominio / risorsa     | Regola                                                     |
 |-----------------------|------------------------------------------------------------|
 | www.diem.unisa.it     | Ammesso.                                                   |
+| rubrica.unisa.it      | Solo contatti scoperti dal personale DIEM.                 |
 | docenti.unisa.it      | Solo profili whitelistati dal personale DIEM.              |
 | corsi.unisa.it        | Solo percorsi/codici DIEM configurati.                     |
+| cd.unisa.it           | Escluso: consigli didattici non sono fonti DIEM.           |
 | uploads PDF           | Rilevati; scaricati solo se robots.txt lo permette.        |
 | query `archive`        | Solo valori allowlistati per news/eventi DIEM.              |
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urldefrag, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urldefrag, urlparse
 
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
@@ -38,13 +42,21 @@ BLOCKED_QUERY_PARAMS = {
     "incubatore",
     "progetto",
     "return",
-    "sitemap",
     "stato",
 }
 # Eccezioni locali: alcuni parametri sono rumore solo su path specifici.
 BLOCKED_QUERY_BY_PATH = {
-    "/ricerca/focus": {"anno", "id"},
+    "/ricerca/focus": {"anno"},
     "/ricerca/progetti-finanziati": {"tip"},
+}
+# Alcune pagine DIEM espongono filtri per tutte le strutture dell'ateneo.
+# Manteniamo solo la struttura DIEM, altrimenti la discovery esplode verso
+# bandi non pertinenti.
+ALLOWED_QUERY_VALUES_BY_PATH_PREFIX = {
+    "/home/bandi": {
+        "struttura": {"300638"},
+        "cdsstruttura": {"300638"},
+    },
 }
 # Allowlist stretta per archivi che aggiungono pagine informative reali.
 ALLOWED_QUERY_VALUES_BY_PATH = {
@@ -54,6 +66,7 @@ ALLOWED_QUERY_VALUES_BY_PATH = {
 # Parametri informativi ammessi solo dove aprono un vero dettaglio.
 ALLOWED_QUERY_PARAMS_BY_PATH = {
     "/ricerca/progetti-finanziati": {"progetto"},
+    "/terza-missione/trasferimento-tecnologico/conto-terzi": {"progetto"},
 }
 NO_INDEX_QUERY_PARAMS = {
     "page",
@@ -64,6 +77,7 @@ NO_INDEX_QUERY_PARAMS = {
     "lang",
     "locale",
     "print",
+    "sitemap",
 }
 
 BLOCKED_PATH_PARTS = (
@@ -179,6 +193,19 @@ def is_metadata_url(url: str) -> bool:
     )
 
 
+def is_english_url(url: str) -> bool:
+    """True per pagine in versione inglese da escludere dal corpus italiano."""
+    segments = path_segments(url)
+    if "en" in segments:
+        return True
+
+    params = {
+        name.lower(): value.lower()
+        for name, value in parse_qsl(urlparse(url).query, keep_blank_values=True)
+    }
+    return params.get("lang") == "en" or params.get("locale") == "en"
+
+
 def query_param_names(url: str) -> set[str]:
     """Nomi dei parametri query, in minuscolo."""
     return {
@@ -199,6 +226,8 @@ def has_allowed_query_value(url: str, name: str) -> bool:
     """True per query eccezionalmente utili su path esplicitamente consentiti."""
     path = urlparse(url).path.lower().rstrip("/")
     allowed_values = ALLOWED_QUERY_VALUES_BY_PATH.get(path, {}).get(name)
+    if not allowed_values and is_course_news_archive_query(url, name):
+        allowed_values = {"1"}
     if not allowed_values:
         return False
 
@@ -210,6 +239,14 @@ def has_allowed_query_value(url: str, name: str) -> bool:
     return bool(values) and all(value in allowed_values for value in values)
 
 
+def is_course_news_archive_query(url: str, name: str) -> bool:
+    """True per archivi news dei corsi/dottorati su corsi.unisa.it."""
+    if name != "archive" or domain_of(url) != "corsi.unisa.it":
+        return False
+    segments = path_segments(url)
+    return bool(segments) and segments[-1] == "news"
+
+
 def has_allowed_query_param(url: str, name: str) -> bool:
     """True per parametri informativi consentiti solo su path specifici."""
     path = urlparse(url).path.lower().rstrip("/")
@@ -219,6 +256,21 @@ def has_allowed_query_param(url: str, name: str) -> bool:
 def has_blocked_query(url: str) -> bool:
     """True per query tecniche che non portano contenuto utile."""
     params = query_param_names(url)
+    path = urlparse(url).path.lower().rstrip("/")
+    for prefix, allowed_params in ALLOWED_QUERY_VALUES_BY_PATH_PREFIX.items():
+        if path == prefix or path.startswith(prefix + "/"):
+            for name, allowed_values in allowed_params.items():
+                values = [
+                    value
+                    for param_name, value in parse_qsl(
+                        urlparse(url).query,
+                        keep_blank_values=True,
+                    )
+                    if param_name.lower() == name
+                ]
+                if values and any(value not in allowed_values for value in values):
+                    return True
+
     blocked_params = {
         param
         for param in params & BLOCKED_QUERY_PARAMS
@@ -228,7 +280,6 @@ def has_blocked_query(url: str) -> bool:
     if blocked_params:
         return True
 
-    path = urlparse(url).path.lower().rstrip("/")
     for prefix, blocked_params in BLOCKED_QUERY_BY_PATH.items():
         if path == prefix or path.startswith(prefix + "/"):
             return bool(params & blocked_params)
@@ -310,7 +361,8 @@ def is_diem_url(url: str, config: dict) -> bool:
 def is_directory_person_url(url: str, config: dict) -> bool:
     """True solo per pagine personali della rubrica UNISA.
 
-    La rubrica viene usata come dominio ponte:
+    La rubrica viene indicizzata solo quando parte dal personale DIEM e viene
+    usata anche come dominio ponte:
     DIEM personale -> rubrica.unisa.it/persone?matricola=... -> docenti.unisa.it
     """
     parsed = urlparse(url)
@@ -341,10 +393,103 @@ def course_has_allowed_identifier(url: str, config: dict) -> bool:
         str(code).lower()
         for code in config_list(config, "scope", "allowed_course_codes")
     }
+    allowed_code_prefixes = {
+        match.group(1)
+        for code in allowed_codes
+        if (match := re.match(r"^(\d{5})(?:[a-z]|$)", code))
+    }
+    allowed_numeric_ids = {
+        str(course_id).lower()
+        for course_id in config_list(config, "scope", "allowed_course_numeric_ids")
+    }
     segments = path_segments(url)
-    return first_path_segment(url) in allowed_course_paths or bool(
-        set(segments) & allowed_codes
+    first_segment = first_path_segment(url)
+    return (
+        first_segment in allowed_course_paths
+        or first_segment in allowed_code_prefixes
+        or bool(
+            set(segments) & (allowed_codes | allowed_numeric_ids)
+        )
     )
+
+
+def decoded_rescue_path_segments(url: str) -> list[str]:
+    """Decodifica il segmento base64 `url/...` delle rescue page UNISA."""
+    raw_segments = [segment for segment in urlparse(url).path.split("/") if segment]
+    lower_segments = [segment.lower() for segment in raw_segments]
+    decoded_segments: list[str] = []
+    for index, segment in enumerate(lower_segments[:-1]):
+        if segment != "url":
+            continue
+        encoded = unquote(raw_segments[index + 1])
+        padding = "=" * (-len(encoded) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(encoded + padding).decode(
+                "utf-8", errors="ignore"
+            )
+        except (ValueError, binascii.Error):
+            continue
+        decoded_segments.extend(path_segments(decoded))
+    return decoded_segments
+
+
+def course_rescue_page_has_allowed_identifier(url: str, config: dict) -> bool:
+    """True per dettagli/news rescue page riferiti a un corso DIEM."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/").lower()
+    if not path.startswith((
+        "/unisa-rescue-page/dettaglio/",
+        "/unisa-rescue-page/search/",
+    )):
+        return False
+
+    allowed_course_paths = configured_course_paths(config)
+    allowed_codes = {
+        str(code).lower()
+        for code in config_list(config, "scope", "allowed_course_codes")
+    }
+    allowed_numeric_ids = {
+        str(course_id).lower()
+        for course_id in config_list(config, "scope", "allowed_course_numeric_ids")
+    }
+    decoded_segments = decoded_rescue_path_segments(url)
+    return bool(decoded_segments) and (
+        decoded_segments[0] in allowed_course_paths
+        or bool(set(decoded_segments) & (allowed_codes | allowed_numeric_ids))
+    )
+
+
+def is_malformed_course_rescue_detail_url(url: str, config: dict) -> bool:
+    """True per rescue URL nate da link relativi appesi al dettaglio corrente."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/").lower()
+    if not path.startswith((
+        "/unisa-rescue-page/dettaglio/",
+        "/unisa-rescue-page/search/",
+    )):
+        return False
+
+    allowed_numeric_ids = {
+        str(course_id).lower()
+        for course_id in config_list(config, "scope", "allowed_course_numeric_ids")
+    }
+    if not allowed_numeric_ids:
+        return False
+
+    raw_segments = [segment.lower() for segment in urlparse(url).path.split("/") if segment]
+    encoded_index = raw_segments.index("url") + 1 if "url" in raw_segments else -1
+    for index, segment in enumerate(raw_segments):
+        if index == encoded_index:
+            continue
+        if segment in allowed_numeric_ids:
+            return True
+
+    if path.startswith("/unisa-rescue-page/search/"):
+        for first, second in zip(raw_segments, raw_segments[1:]):
+            if first == second and first != "url":
+                return True
+
+    return False
 
 
 def is_known_scope_source(source_url: str | None, config: dict) -> bool:
@@ -359,7 +504,13 @@ def is_known_scope_source(source_url: str | None, config: dict) -> bool:
     return (
         is_diem_url(source_url, config)
         or domain == teacher_domain
-        or (domain == course_domain and course_has_allowed_identifier(source_url, config))
+        or (
+            domain == course_domain
+            and (
+                course_has_allowed_identifier(source_url, config)
+                or course_rescue_page_has_allowed_identifier(source_url, config)
+            )
+        )
     )
 
 def is_diem_personnel_url(url: str | None, config: dict) -> bool:
@@ -389,7 +540,7 @@ def has_authorized_directory_bridge(context: dict | None) -> bool:
 
 
 def is_directory_link_in_scope(url: str, source_url: str | None, config: dict) -> bool:
-    """Permette la rubrica solo come ponte dalla pagina personale DIEM."""
+    """Permette la rubrica solo dalla pagina personale DIEM."""
     if not is_directory_person_url(url, config):
         return False
 
@@ -402,9 +553,6 @@ def is_teacher_link_in_scope(
     context: dict | None = None,
 ) -> bool:
     """Permette solo profili docenti scoperti dal personale DIEM."""
-    if not source_url:
-        return False
-
     target_profile = teacher_profile_key(url, config)
     if not target_profile:
         return False
@@ -412,6 +560,9 @@ def is_teacher_link_in_scope(
     allowed_profiles = allowed_teacher_profiles_from_context(context)
     if target_profile in allowed_profiles:
         return True
+
+    if not source_url:
+        return False
 
     # Primo ingresso autorizzato: il profilo viene poi registrato nella whitelist.
     if is_diem_personnel_url(source_url, config):
@@ -463,6 +614,10 @@ def is_in_scope_url(
     if domain not in allowed_domains:
         return False, "domain"
 
+    teaching_council_domain = scope_value(config, "teaching_council_domain", "cd.unisa.it")
+    if domain == teaching_council_domain:
+        return False, "scope_teaching_council"
+
     if is_diem_url(url, config):
         return True, "ok"
     
@@ -480,7 +635,23 @@ def is_in_scope_url(
 
     course_domain = scope_value(config, "course_domain", "corsi.unisa.it")
     if domain == course_domain:
-        if course_has_allowed_identifier(url, config):
+        if is_malformed_course_rescue_detail_url(url, config):
+            return False, "malformed_course_rescue"
+        if course_has_allowed_identifier(url, config) or (
+            domain_of(source_url or "") == course_domain
+            and course_has_allowed_identifier(source_url or "", config)
+        ) or course_rescue_page_has_allowed_identifier(url, config):
+            return True, "ok"
+        if (
+            urlparse(url).path.rstrip("/").lower().startswith(
+                "/unisa-rescue-page/dettaglio/"
+            )
+            and domain_of(source_url or "") == course_domain
+            and (
+                course_has_allowed_identifier(source_url or "", config)
+                or course_rescue_page_has_allowed_identifier(source_url or "", config)
+            )
+        ):
             return True, "ok"
         return False, "scope_course"
 
@@ -499,6 +670,8 @@ def can_traverse_url(
         return False, "scheme"
     if is_metadata_url(url):
         return False, "metadata"
+    if is_english_url(url):
+        return False, "language"
 
     ok, reason = is_in_scope_url(url, config, context)
     if not ok:
@@ -525,11 +698,6 @@ def can_index_url(
     ok, reason = can_traverse_url(url, config, context)
     if not ok:
         return False, reason
-
-    # La rubrica è solo un ponte verso docenti.unisa.it:
-    # la attraversiamo, ma non la indicizziamo.
-    if is_directory_person_url(url, config):
-        return False, "directory_bridge_not_indexable"
 
     if has_noisy_query(url):
         return False, "noisy_query"

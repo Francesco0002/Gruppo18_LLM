@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from extract_pdf import (  # noqa: E402
     AsyncPdfDownloadLimiter,
+    build_manifest_record,
     download_pdf_async,
     load_pdf_runtime_settings,
     pdf_records,
@@ -110,6 +111,55 @@ class PdfExtractionTests(unittest.TestCase):
 
         self.assertEqual(stats["duplicates"], 1)
         self.assertTrue(updated[0]["is_duplicate"])
+
+    def test_empty_pdf_markdown_is_failed_as_no_text_extracted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            record = build_manifest_record(
+                {
+                    "record": pdf_record(),
+                    "status": "downloaded",
+                    "raw_pdf_path": "data/raw_pdf/ab/abc123.pdf",
+                    "content_length": 1234,
+                },
+                markdown="",
+                config={
+                    "paths": {
+                        "processed_raw_markdown_dir": str(base / "markdown_raw"),
+                        "processed_markdown_dir": str(base / "markdown"),
+                    }
+                },
+            )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["error_kind"], "no_text_extracted")
+        self.assertFalse(record["text_extracted"])
+        self.assertFalse(record["indexable"])
+        self.assertIsNone(record["index_markdown_path"])
+
+    def test_short_pdf_markdown_stays_ok_but_not_indexable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            record = build_manifest_record(
+                {
+                    "record": pdf_record(),
+                    "status": "downloaded",
+                    "raw_pdf_path": "data/raw_pdf/ab/abc123.pdf",
+                    "content_length": 1234,
+                },
+                markdown="Testo breve ma realmente estratto.",
+                config={
+                    "paths": {
+                        "processed_raw_markdown_dir": str(base / "markdown_raw"),
+                        "processed_markdown_dir": str(base / "markdown"),
+                    }
+                },
+            )
+
+        self.assertEqual(record["status"], "ok")
+        self.assertFalse(record["text_extracted"])
+        self.assertFalse(record["indexable"])
+        self.assertIsNotNone(record["index_markdown_path"])
 
 
 class AsyncPdfExtractionTests(unittest.IsolatedAsyncioTestCase):

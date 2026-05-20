@@ -276,13 +276,13 @@ def visit_skip_reason(
     ):
         return "recently_known"
 
-    ok, _ = can_traverse_url(
+    ok, reason = can_traverse_url(
         item.url,
         config,
         filter_context(item.discovered_from, state.allowed_teacher_profiles),
     )
     if not ok:
-        return "out_of_scope"
+        return reason
 
     domain = urlparse(item.url).netloc
     domain_limit = config["crawler"]["per_domain_limits"].get(domain, 0)
@@ -345,6 +345,10 @@ def take_batch(
                 # che l'URL sia stato visitato: va riprovato in run future.
                 deferred_items.append(item)
                 state.queued.add(item.url)
+            elif item.force_revisit:
+                # Una riespansione forzata che oggi non passa piu' i filtri non
+                # deve restare nel backlog persistente e bloccare ogni run.
+                state.expansion_backlog.pop(item.url, None)
             continue
 
         mark_visited(state, item.url, visited_at)

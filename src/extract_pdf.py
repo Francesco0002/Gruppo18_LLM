@@ -504,6 +504,15 @@ def base_manifest_record(record: DiscoveryRecord, status: str, crawled_at: str) 
     }
 
 
+def pdf_text_failure_kind(clean_body: str, clean_warnings: list[str]) -> str | None:
+    """Classifica estrazioni PDF tecnicamente riuscite ma prive di testo utile."""
+    if "empty_structured_pdf" in clean_warnings:
+        return "empty_structured_pdf"
+    if not clean_body.strip():
+        return "no_text_extracted"
+    return None
+
+
 def build_manifest_record(
     download: dict,
     markdown: str = "",
@@ -548,7 +557,6 @@ def build_manifest_record(
     if config is None:
         raise ValueError("config è richiesto per salvare il Markdown PDF.")
 
-    raw_output_path = write_text(raw_markdown_path(record["hash"], config), markdown)
     metadata = {
         "url": record["url"],
         "document_url": record.get("document_url", record["url"]),
@@ -563,6 +571,26 @@ def build_manifest_record(
         source="pdf",
         metadata=metadata,
     )
+    text_failure_kind = pdf_text_failure_kind(clean_body, quality["clean_warnings"])
+    if text_failure_kind is not None:
+        manifest_record = base_manifest_record(record, "failed", crawled_at)
+        manifest_record.update(
+            content_hash=None,
+            raw_content_hash=content_hash(markdown),
+            raw_markdown_path=None,
+            index_markdown_path=None,
+            raw_pdf_path=download.get("raw_pdf_path"),
+            content_length=download.get("content_length"),
+            text_extracted=False,
+            markdown_chars=len(clean_body),
+            indexable=False,
+            error=f"{text_failure_kind}: no extractable PDF text",
+            error_kind=text_failure_kind,
+            **quality,
+        )
+        return manifest_record
+
+    raw_output_path = write_text(raw_markdown_path(record["hash"], config), markdown)
     output_path = markdown_path(record["hash"], config)
     markdown_output = write_text(output_path, index_markdown)
     text_extracted = (
@@ -796,7 +824,7 @@ async def run_extract_pdf_async(config: dict | None = None) -> dict:
                     extracted_ok += 1
                 else:
                     failed += 1
-                    error_kinds["extract_failed"] += 1
+                    error_kinds[str(manifest.get("error_kind") or "extract_failed")] += 1
                 update_progress(progress)
             extraction_queue.task_done()
 

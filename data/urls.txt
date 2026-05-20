@@ -13,3 +13,19 @@ https://www.diem.unisa.it/dipartimento/personale
 https://www.diem.unisa.it/didattica/offerta-formativa
 https://www.diem.unisa.it/dipartimento/strutture
 https://www.diem.unisa.it/home/contatti
+# Corsi DIEM: seed diretti per non dipendere solo dai link scoperti da DIEM
+https://corsi.unisa.it/ingegneria-informatica
+https://corsi.unisa.it/ingegneria-dell-informazione-per-la-medicina-digitale
+https://corsi.unisa.it/electrical-engineering-for-digital-energy
+https://corsi.unisa.it/information-engineering-for-digital-medicine
+https://corsi.unisa.it/ingegneria-informatica-magistrale
+https://corsi.unisa.it/ingegneria-dell-informazione
+https://corsi.unisa.it/photovoltaics
+https://corsi.unisa.it/DOT18CK8F9
+https://corsi.unisa.it/DOT229NLP9
+https://corsi.unisa.it/0650106200800001
+https://corsi.unisa.it/0650106200800003
+https://corsi.unisa.it/0650107302900001
+https://corsi.unisa.it/0650107303300001
+https://corsi.unisa.it/0650107303300003
+

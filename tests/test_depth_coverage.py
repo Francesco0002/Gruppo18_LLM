@@ -91,6 +91,8 @@ class DepthCoverageTests(unittest.TestCase):
                 },
             )
 
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["error_kind"], "empty_structured_pdf")
         self.assertFalse(record["text_extracted"])
         self.assertFalse(record["indexable"])
         self.assertIn("empty_structured_pdf", record["clean_warnings"])

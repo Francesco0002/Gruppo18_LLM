@@ -12,11 +12,12 @@ La decisione se un URL sia nello scope resta in url_filters.py.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from url_filters import can_traverse_url, normalize_url
+from url_filters import can_traverse_url, decoded_rescue_path_segments, normalize_url
 
 
 def resolve_href(base_url: str, href: str) -> str:
@@ -29,7 +30,43 @@ def resolve_href(base_url: str, href: str) -> str:
     href = href.strip()
     if href.startswith("uploads/"):
         href = "/" + href
+    if is_plain_relative_href(href):
+        href_first_segment = href.split("/", 1)[0].lower()
+        if is_course_numeric_alias_segment(href_first_segment):
+            href = "/" + href
+        elif is_course_rescue_wrapped_path(base_url):
+            rescue_segments = decoded_rescue_path_segments(base_url)
+            if rescue_segments and href_first_segment != rescue_segments[0]:
+                href = f"/{rescue_segments[0]}/{href}"
+            else:
+                href = "/" + href
     return urljoin(base_url, href)
+
+
+def is_course_rescue_wrapped_path(url: str) -> bool:
+    """True se il base URL e' una rescue page che incapsula un path corso."""
+    path = urlparse(url).path.rstrip("/").lower()
+    return path.startswith((
+        "/unisa-rescue-page/dettaglio/",
+        "/unisa-rescue-page/search/",
+    ))
+
+
+def is_plain_relative_href(href: str) -> bool:
+    """True per link relativi di navigazione, non query/anchor/asset assoluti."""
+    parsed = urlparse(href)
+    return (
+        not parsed.scheme
+        and not parsed.netloc
+        and bool(parsed.path)
+        and not href.startswith(("/", "#", "?"))
+        and not href.startswith(("./", "../"))
+    )
+
+
+def is_course_numeric_alias_segment(segment: str) -> bool:
+    """True per alias corso numerici usati come primo segmento da corsi.unisa.it."""
+    return bool(re.fullmatch(r"\d{16}", segment))
 
 
 def extract_canonical_from_soup(soup: BeautifulSoup, fallback_url: str) -> str:

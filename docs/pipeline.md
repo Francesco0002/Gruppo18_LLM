@@ -115,6 +115,13 @@ lista solo se viene scoperto dalla pagina `dipartimento/personale` o dal ponte
 crawler può navigare solo le sottopagine dello stesso profilo; link verso altri
 docenti non autorizzati restano fuori scope.
 
+Le pagine `rubrica.unisa.it/persone?matricola=...` sono indicizzabili solo se
+scoperte da `www.diem.unisa.it/dipartimento/personale`, così i contatti dei
+professori DIEM entrano nel manifest senza aprire la rubrica a persone esterne.
+Il dominio dei consigli didattici (`cd.unisa.it`, ad esempio
+`/ingegneria-informatica/commissioni`) resta fuori scope insieme ai contatti
+elencati da quelle pagine.
+
 Le query tecniche restano bloccate di default. L'unica eccezione per `archive`
 è una allowlist esplicita di pagine informative:
 
@@ -607,7 +614,10 @@ modificata l'estrazione raw.
 
 I Markdown puliti sotto 100 caratteri restano tracciati nel manifest, ma sono
 marcati `text_extracted=false` e `indexable=false` per evitare chunk di sola
-navigazione o pagine tecniche quasi vuote.
+navigazione o pagine tecniche quasi vuote. Se invece un PDF non produce alcun
+testo estraibile, come nel caso dei PDF scannerizzati senza OCR, il record
+processed viene marcato `status="failed"` con `error_kind="no_text_extracted"`;
+gli export tabellari privi di dati finiscono in `empty_structured_pdf`.
 
 Per ripartire da zero:
 
