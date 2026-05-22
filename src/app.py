@@ -6,6 +6,7 @@ from rag_chain import DEFAULT_FINAL_K, DEFAULT_GROQ_MODEL, answer_question_as_te
 
 # Il nome dell'autore DEVE corrispondere (senza spazi strani o simboli se non necessari, "DIEM Bot" va benissimo)
 BOT_NAME = "DIEM Bot"
+MAX_CONVERSATION_MESSAGES = 12
 
 WELCOME_MESSAGE = """
 👋 **Benvenuto nel chatbot DIEM**
@@ -22,6 +23,42 @@ Posso aiutarti a cercare informazioni nelle fonti ufficiali del DIEM, ad esempio
 Scrivi una domanda per iniziare.
 """
 
+
+def get_conversation_history() -> list[dict[str, str]]:
+    history = cl.user_session.get("conversation_history") or []
+
+    if not isinstance(history, list):
+        return []
+
+    clean_history: list[dict[str, str]] = []
+
+    for item in history[-MAX_CONVERSATION_MESSAGES:]:
+        if not isinstance(item, dict):
+            continue
+
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+
+        if role in {"user", "assistant"} and content:
+            clean_history.append({"role": role, "content": content})
+
+    return clean_history
+
+
+def save_conversation_turn(question: str, answer: str) -> None:
+    history = get_conversation_history()
+    history.extend(
+        [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer},
+        ]
+    )
+    cl.user_session.set(
+        "conversation_history",
+        history[-MAX_CONVERSATION_MESSAGES:],
+    )
+
+
 @cl.on_chat_start
 async def start():
     """
@@ -29,6 +66,7 @@ async def start():
     """
     cl.user_session.set("model", DEFAULT_GROQ_MODEL)
     cl.user_session.set("final_k", DEFAULT_FINAL_K)
+    cl.user_session.set("conversation_history", [])
     
     # Avendo messo i loghi dentro src/public/ nominati logo_dark.png e logo_light.png,
     # Chainlit li applica già come logo globale dell'applicazione.
@@ -65,11 +103,16 @@ async def on_example_question(action: cl.Action):
     if not question:
         return
 
+    history = get_conversation_history()
+
     answer = await cl.make_async(answer_question_as_text)(
         question=question,
         final_k=DEFAULT_FINAL_K,
         model=DEFAULT_GROQ_MODEL,
+        conversation_history=history,
     )
+
+    save_conversation_turn(question, answer)
 
     await cl.Message(
         content=answer,
@@ -88,6 +131,7 @@ async def main(message: cl.Message):
     
     model = cl.user_session.get("model") or DEFAULT_GROQ_MODEL
     final_k = cl.user_session.get("final_k") or DEFAULT_FINAL_K
+    history = get_conversation_history()
 
     # Feedback visivo del RAG
     async with cl.Step(name="Ricerca nelle fonti DIEM", type="tool") as step:
@@ -99,8 +143,10 @@ async def main(message: cl.Message):
                 question=question,
                 final_k=final_k,
                 model=model,
+                conversation_history=history,
             )
             step.output = "Risposta generata!"
+            save_conversation_turn(question, answer)
         except Exception as exc:
             step.output = f"Errore: {exc}"
             answer = (

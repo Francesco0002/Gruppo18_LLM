@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -24,8 +25,8 @@ from vector_store import CHUNKS_FILE
 
 DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
 
-DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "5"))
-DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "6000"))
+DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "7"))
+DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "9000"))
 
 GROQ_TIMEOUT_SECONDS = int(os.getenv("GROQ_TIMEOUT_SECONDS", "60"))
 GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
@@ -35,6 +36,9 @@ GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
     "on",
 }
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "3"))
+
+
+ConversationTurn = dict[str, str]
 
 
 @dataclass
@@ -101,15 +105,52 @@ def get_source_from_result(result: RetrievalResult) -> Source:
     )
 
 
+def clean_display_url(url: str) -> str:
+    """
+    Pulisce gli URL mostrati all'utente senza modificare i metadati originali.
+    Query string e frammenti sono utili internamente, ma rumorosi nelle fonti.
+    """
+    if not url or url == "URL non disponibile":
+        return url
+
+    parts = urlsplit(url)
+
+    if not parts.scheme or not parts.netloc:
+        return url
+
+    path = parts.path.rstrip("/") or "/"
+
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            path,
+            "",
+            "",
+        )
+    )
+
+
+def get_display_source_from_result(result: RetrievalResult) -> Source:
+    source = get_source_from_result(result)
+
+    return Source(
+        title=source.title,
+        url=clean_display_url(source.url),
+        breadcrumb=source.breadcrumb,
+        chunk_id=source.chunk_id,
+    )
+
+
 def build_sources(results: list[RetrievalResult]) -> list[Source]:
     """
-    Deduplica le fonti per URL, preservando l'ordine dei risultati.
+    Deduplica le fonti per URL pulito, preservando l'ordine dei risultati.
     """
     sources: list[Source] = []
     seen_urls: set[str] = set()
 
     for result in results:
-        source = get_source_from_result(result)
+        source = get_display_source_from_result(result)
 
         if source.url in seen_urls:
             continue
@@ -169,7 +210,176 @@ def build_context(
     return "\n\n---\n\n".join(blocks)
 
 
-def build_prompt(question: str, context: str) -> str:
+LAB_ALIAS_PATTERNS = (
+    (re.compile(r"\b(?:labrob|roblab|laboratorio\s+di\s+robotica)\b", re.IGNORECASE), "Laboratorio di Robotica LabROB del DIEM"),
+    (re.compile(r"\b(?:nclab|computazione\s+naturale)\b", re.IGNORECASE), "NCLab Computazione Naturale del DIEM"),
+    (re.compile(r"\b(?:lcem|caratterizzazione\s+elettromagnetica)\b", re.IGNORECASE), "LCEM Caratterizzazione Elettromagnetica dei Materiali del DIEM"),
+    (re.compile(r"\b(?:mivia|macchine\s+intelligenti)\b", re.IGNORECASE), "MIVIA Macchine Intelligenti per il Riconoscimento di Video, Immagini e Audio del DIEM"),
+    (re.compile(r"\b(?:inbit|intelligent\s+bioengineering)\b", re.IGNORECASE), "INBIT Intelligent Bioengineering Technologies del DIEM"),
+    (re.compile(r"\b(?:knowmis|knowledge\s+management)\b", re.IGNORECASE), "KnowMIS Knowledge Management and Information Systems del DIEM"),
+    (re.compile(r"\b(?:te4de|digital\s+energy)\b", re.IGNORECASE), "TE4DE Tecnologie Elettriche per la Digital Energy del DIEM"),
+    (re.compile(r"\b(?:teti|telecomunicazioni)\b", re.IGNORECASE), "TETI Telecomunicazioni e Teoria dell'Informazione del DIEM"),
+)
+
+
+FOLLOW_UP_PATTERNS = [
+    r"\bsuo\b",
+    r"\bsua\b",
+    r"\bsuoi\b",
+    r"\bsue\b",
+    r"\bquest[oaie]\b",
+    r"\bquel(?:lo|la|li|le)?\b",
+    r"\btale\b",
+    r"\blaboratorio\b",
+    r"\bstruttura\b",
+    r"\bche strumenti possiede\b",
+    r"\bquali strumenti\b",
+    r"\bquando scade\b",
+    r"\bqual[ie] sono\b",
+    r"\bcome funziona\b",
+    r"\bchi (?:è|e|sono)\b",
+    r"\bdove si trova\b",
+    r"\bdi cosa si occupa\b",
+    r"\bquanto dura\b",
+    r"\bcome si accede\b",
+    r"\bcome posso candidarmi\b",
+    r"\bquali requisiti\b",
+]
+
+
+SUBJECT_PATTERNS = (
+    (re.compile(r"\borari?\s+di\s+ricevimento\b|\bricevimento\b", re.IGNORECASE), "orari di ricevimento dei docenti DIEM"),
+    (re.compile(r"\b(?:erasmus|mobilità|mobilita|accordi\s+erasmus|traineeship|learning\s+agreement)\b", re.IGNORECASE), "Erasmus e mobilità internazionale del DIEM"),
+    (re.compile(r"\b(?:dottorato|dottorati|phd|doctoral)\b", re.IGNORECASE), "dottorati collegati al DIEM"),
+    (re.compile(r"\b(?:progetti?\s+finanziati?|progetti?\s+di\s+ricerca|ricerca|intelligenza\s+artificiale|ia\s+generativa)\b", re.IGNORECASE), "progetti di ricerca e progetti finanziati del DIEM"),
+    (re.compile(r"\b(?:bandi?|avvisi?|graduatorie?|selezion[ei]|concorso|concorsi)\b", re.IGNORECASE), "bandi e avvisi del DIEM"),
+    (re.compile(r"\b(?:corsi?\s+di\s+laurea|laure[ae]|laurea\s+magistrale|offerta\s+formativa|insegnamenti?|didattica)\b", re.IGNORECASE), "offerta formativa e corsi di laurea del DIEM"),
+    (re.compile(r"\b(?:docenti|professori|professore|professoressa|personale|rubrica)\b", re.IGNORECASE), "docenti e personale del DIEM"),
+    (re.compile(r"\b(?:laboratori|laboratorio|strutture|aule|centri)\b", re.IGNORECASE), "laboratori e strutture del DIEM"),
+    (re.compile(r"\b(?:contatti?|sede|indirizzo|ubicazione|dove\s+si\s+trova)\b", re.IGNORECASE), "sede e contatti del DIEM"),
+    (re.compile(r"\b(?:immatricolazioni?|iscrizion[ei]|accesso|requisiti|tolc|ofa|ammissione)\b", re.IGNORECASE), "requisiti di accesso e immatricolazioni dei corsi DIEM"),
+    (re.compile(r"\b(?:servizi?|orientamento|tutorato|segreteria)\b", re.IGNORECASE), "servizi e orientamento del DIEM"),
+)
+
+
+def normalize_conversation_history(
+    conversation_history: list[ConversationTurn] | None,
+    max_messages: int = 12,
+) -> list[ConversationTurn]:
+    if not conversation_history:
+        return []
+
+    normalized: list[ConversationTurn] = []
+
+    for turn in conversation_history[-max_messages:]:
+        role = str(turn.get("role") or "").strip().lower()
+        content = str(turn.get("content") or "").strip()
+
+        if role not in {"user", "assistant"} or not content:
+            continue
+
+        normalized.append({"role": role, "content": content})
+
+    return normalized
+
+
+def expand_known_aliases(question: str) -> str:
+    normalized_question = question.lower()
+
+    for pattern, expansion in LAB_ALIAS_PATTERNS:
+        if not pattern.search(question):
+            continue
+
+        if expansion.lower() in normalized_question:
+            return question
+
+        return f"{question} {expansion}"
+
+    return question
+
+
+def is_context_dependent_question(question: str) -> bool:
+    question_lower = question.lower()
+    tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9_]+", question_lower)
+
+    if len(tokens) <= 6:
+        return True
+
+    return any(re.search(pattern, question_lower) for pattern in FOLLOW_UP_PATTERNS)
+
+
+def extract_recent_subject(conversation_history: list[ConversationTurn] | None) -> str:
+    for turn in reversed(normalize_conversation_history(conversation_history)):
+        content = turn["content"]
+
+        for pattern, subject in LAB_ALIAS_PATTERNS:
+            if pattern.search(content):
+                return subject
+
+        teacher_match = re.search(
+            r"\b(?:prof\.?|professore|professoressa|docente)\s+([A-ZÀ-Ý][a-zà-ÿ]+(?:\s+[A-ZÀ-Ý][a-zà-ÿ]+){1,2})",
+            content,
+        )
+        if teacher_match:
+            return f"docente {teacher_match.group(1)} del DIEM"
+
+        for pattern, subject in SUBJECT_PATTERNS:
+            if pattern.search(content):
+                return subject
+
+    return ""
+
+
+def build_retrieval_question(
+    question: str,
+    conversation_history: list[ConversationTurn] | None = None,
+) -> str:
+    """
+    Rende più autonome le domande di follow-up prima del retrieval.
+    La riscrittura è deterministica e prudente: se non trova un soggetto
+    recente affidabile, lascia la domanda invariata.
+    """
+    question = question.strip()
+    alias_expanded_question = expand_known_aliases(question)
+
+    if alias_expanded_question != question:
+        return alias_expanded_question
+
+    if not is_context_dependent_question(question):
+        return question
+
+    subject = extract_recent_subject(conversation_history)
+
+    if not subject:
+        return question
+
+    return f"{question} {subject}"
+
+
+def build_conversation_context(
+    conversation_history: list[ConversationTurn] | None = None,
+    retrieval_question: str = "",
+    original_question: str = "",
+) -> str:
+    lines: list[str] = []
+    history = normalize_conversation_history(conversation_history, max_messages=8)
+
+    for turn in history:
+        label = "Utente" if turn["role"] == "user" else "Assistente"
+        content = truncate_text(turn["content"], 700)
+        lines.append(f"{label}: {content}")
+
+    if retrieval_question and retrieval_question != original_question:
+        lines.append(f"Domanda contestualizzata per il recupero: {retrieval_question}")
+
+    return "\n".join(lines)
+
+
+def build_prompt(
+    question: str,
+    context: str,
+    conversation_context: str = "",
+) -> str:
     """
     Prompt RAG rigido:
     - usa solo il contesto;
@@ -177,6 +387,16 @@ def build_prompt(question: str, context: str) -> str:
     - gestisce fuori dominio;
     - non produce fonti inventate.
     """
+    conversation_block = ""
+    if conversation_context.strip():
+        conversation_block = f"""
+CONTESTO CONVERSAZIONALE:
+{conversation_context}
+
+Usa il contesto conversazionale solo per capire a quale soggetto si riferisce la domanda.
+Non usarlo come fonte fattuale: le informazioni della risposta devono venire dal CONTESTO documentale.
+""".strip()
+
     return f"""
 Sei un assistente informativo del DIEM dell'Università di Salerno.
 
@@ -191,7 +411,12 @@ Se la domanda non riguarda il DIEM, i corsi DIEM, i docenti DIEM, i servizi DIEM
 le attività didattiche, di ricerca, internazionali o i documenti ufficiali indicizzati,
 rispondi chiaramente: ""La domanda è fuori dal contesto del DIEM.""
 
-Rispondi in italiano, in modo chiaro e sintetico.
+Rispondi in italiano, in modo chiaro, completo e strutturato.
+Se il contesto contiene più dettagli utili, includili nella risposta.
+Per domande che chiedono elenchi, panoramiche o informazioni articolate, usa punti elenco.
+Non essere telegrafico: scrivi una risposta utile, con più frasi quando il contesto lo consente.
+Quando sono disponibili dettagli su attività, strumenti, responsabili, sedi, date o descrizioni, includili in modo ordinato.
+Non essere eccessivamente sintetico, ma non aggiungere informazioni non presenti nel contesto.
 Inserisci citazioni inline nel testo, usando i numeri dei documenti: [1], [2].
 Ogni affermazione fattuale specifica deve avere almeno una citazione.
 
@@ -228,6 +453,8 @@ Esempio quando il contesto non basta:
 
 CONTESTO:
 {context}
+
+{conversation_block}
 
 DOMANDA UTENTE:
 {question}
@@ -470,7 +697,7 @@ def filter_sources_by_document_indexes(
         if not 0 <= result_position < len(results):
             continue
 
-        source = get_source_from_result(results[result_position])
+        source = get_display_source_from_result(results[result_position])
 
         if source.url in seen_urls:
             continue
@@ -865,6 +1092,7 @@ def answer_question(
     final_k: int = DEFAULT_FINAL_K,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
     model: str = DEFAULT_GROQ_MODEL,
+    conversation_history: list[ConversationTurn] | None = None,
 ) -> RagResponse:
     """
     Pipeline RAG completa:
@@ -874,6 +1102,11 @@ def answer_question(
 
     if not question:
         raise ValueError("La domanda non può essere vuota.")
+
+    retrieval_question = build_retrieval_question(
+        question=question,
+        conversation_history=conversation_history,
+    )
     
     if is_out_of_scope_university_query(question):
         return RagResponse(
@@ -894,7 +1127,7 @@ def answer_question(
     # Caso particolare ma generale:
     # se l'utente chiede gli orari di ricevimento dei docenti senza indicare il nome,
     # non ha senso recuperare docenti casuali.
-    if is_generic_office_hours_query(question):
+    if is_generic_office_hours_query(retrieval_question):
         return RagResponse(
             question=question,
             answer=(
@@ -905,12 +1138,12 @@ def answer_question(
             retrieved_chunks=[],
         )
 
-    if is_specific_office_hours_query(question):
-        profile_chunks, personnel_result = retrieve_teacher_office_hours(question)
+    if is_specific_office_hours_query(retrieval_question):
+        profile_chunks, personnel_result = retrieve_teacher_office_hours(retrieval_question)
 
         if profile_chunks:
             direct_answer = build_direct_office_hours_answer(
-                question=question,
+                question=retrieval_question,
                 results=profile_chunks,
             )
 
@@ -951,12 +1184,12 @@ def answer_question(
         )
 
     retrieved_chunks = hybrid_retrieve(
-        query=question,
+        query=retrieval_question,
         final_k=final_k,
     )
 
     retrieved_chunks = filter_chunks_for_generation(
-        question=question,
+        question=retrieval_question,
         results=retrieved_chunks,
     )
 
@@ -971,7 +1204,7 @@ def answer_question(
     # Per gli orari di ricevimento è più sicuro estrarre direttamente la tabella
     # invece di affidarsi alla generazione del modello.
     direct_answer = build_direct_office_hours_answer(
-        question=question,
+        question=retrieval_question,
         results=retrieved_chunks,
     )
 
@@ -988,7 +1221,7 @@ def answer_question(
     # Se la domanda riguarda l'orario di ricevimento di un docente specifico
     # ma non siamo riusciti a estrarre la tabella, non passiamo al modello generativo:
     # meglio evitare risposte inventate o errori di memoria.
-    if is_specific_office_hours_query(question):
+    if is_specific_office_hours_query(retrieval_question):
         sources = build_sources(retrieved_chunks)
 
         return RagResponse(
@@ -1006,7 +1239,17 @@ def answer_question(
         max_context_chars=max_context_chars,
     )
 
-    prompt = build_prompt(question=question, context=context)
+    conversation_context = build_conversation_context(
+        conversation_history=conversation_history,
+        retrieval_question=retrieval_question,
+        original_question=question,
+    )
+
+    prompt = build_prompt(
+        question=question,
+        context=context,
+        conversation_context=conversation_context,
+    )
 
     raw_answer = call_groq(
         prompt=prompt,
@@ -1059,6 +1302,7 @@ def answer_question_as_text(
     question: str,
     final_k: int = DEFAULT_FINAL_K,
     model: str = DEFAULT_GROQ_MODEL,
+    conversation_history: list[ConversationTurn] | None = None,
 ) -> str:
     """
     Utility comoda per CLI/Chainlit: restituisce risposta già formattata.
@@ -1072,6 +1316,7 @@ def answer_question_as_text(
         question=question,
         final_k=final_k,
         model=model,
+        conversation_history=conversation_history,
     )
 
     if not response.sources:

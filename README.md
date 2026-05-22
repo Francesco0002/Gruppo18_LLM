@@ -56,8 +56,8 @@ GROQ_MODEL=qwen/qwen3-32b
 GROQ_TIMEOUT_SECONDS=60
 GROQ_MAX_RETRIES=3
 GROQ_JSON_MODE=true
-RAG_FINAL_K=5
-RAG_MAX_CONTEXT_CHARS=6000
+RAG_FINAL_K=7
+RAG_MAX_CONTEXT_CHARS=9000
 EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 EMBEDDING_DEVICE=auto
 EMBEDDING_BATCH_SIZE=64
@@ -269,8 +269,8 @@ eval/retrieval_report.md
 
 Metriche:
 
-- `recall@5`: quota di domande in cui almeno una fonte corretta compare nei primi 5 risultati. È la metrica più importante per il chatbot, perché `RAG_FINAL_K` di default è 5.
-- `recall@10`: come sopra, ma sui primi 10. Se è alto e `recall@5` è basso, il retriever trova la fonte ma il ranking va migliorato.
+- `recall@5`: quota di domande in cui almeno una fonte corretta compare nei primi 5 risultati.
+- `recall@10`: come sopra, ma sui primi 10. Con `RAG_FINAL_K=7`, aiuta a capire se la fonte è vicina al contesto passato al chatbot anche quando non è nei primissimi risultati.
 - `mrr@10`: premia fonti corrette molto in alto. Valore vicino a 1 significa che la fonte corretta è spesso prima.
 - `ndcg@5` e `ndcg@10`: misurano la qualità dell'ordine dei risultati, non solo la presenza di almeno una fonte corretta.
 - `evaluated`: numero di domande con fonte attesa.
