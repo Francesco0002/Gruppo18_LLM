@@ -4,16 +4,23 @@ import argparse
 import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
-from pipeline_io import BASE_DIR, load_jsonl
-from retrieval import hybrid_retrieve
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+sys.path.insert(0, str(SRC_DIR))
 
 
-DEFAULT_GOLDEN_FILE = BASE_DIR / "eval" / "golden_questions.jsonl"
-DEFAULT_OUTPUT_JSON = BASE_DIR / "eval" / "retrieval_report.json"
-DEFAULT_OUTPUT_MD = BASE_DIR / "eval" / "retrieval_report.md"
+from pipeline_io import load_jsonl  
+from retrieval import hybrid_retrieve  
+
+
+DEFAULT_GOLDEN_FILE = ROOT_DIR / "eval" / "golden_questions_retrieval_eval_only.jsonl"
+DEFAULT_OUTPUT_JSON = ROOT_DIR / "eval" / "results" / "retrieval_report.json"
+DEFAULT_OUTPUT_MD = ROOT_DIR / "eval" / "results" / "retrieval_report.md"
 
 
 def url_for_result(result) -> str:
@@ -25,20 +32,38 @@ def url_for_result(result) -> str:
     )
 
 
-def is_relevant(result, expected_url_contains: list[str]) -> bool:
+def is_relevant(result, expected_source_groups: list[list[str]]) -> bool:
     """
-    Relevance semplice e ispezionabile: un risultato è corretto se URL/titolo
-    contengono almeno uno dei pattern dichiarati nel golden set.
+    Un risultato è rilevante se contiene tutti i pattern di almeno un gruppo.
+
+    Esempio:
+    [["docenti.unisa.it/005501"], ["mario", "vento", "ricevimento"]]
+
+    È rilevante se trova:
+    - docenti.unisa.it/005501
+    oppure
+    - mario + vento + ricevimento
     """
-    if not expected_url_contains:
+    if not expected_source_groups:
         return False
 
-    url = url_for_result(result).lower()
-    text = f"{result.metadata.get('title') or ''} {result.metadata.get('breadcrumb_text') or ''}".lower()
-    haystack = f"{url} {text}"
+    metadata = result.metadata or {}
 
-    return any(needle.lower() in haystack for needle in expected_url_contains)
+    url = url_for_result(result)
+    title = str(metadata.get("title") or "")
+    breadcrumb = str(metadata.get("breadcrumb") or metadata.get("breadcrumb_text") or "")
+    text = str(getattr(result, "text", "") or "")
 
+    haystack = f"{url} {title} {breadcrumb} {text}".lower()
+
+    for group in expected_source_groups:
+        normalized_group = [str(item).lower() for item in group if str(item).strip()]
+
+        if normalized_group and all(item in haystack for item in normalized_group):
+            return True
+
+    return False
+  
 
 def dcg(relevances: list[int]) -> float:
     return sum(
@@ -48,24 +73,22 @@ def dcg(relevances: list[int]) -> float:
 
 
 def evaluate_query(item: dict[str, Any], k_values: tuple[int, ...]) -> dict[str, Any]:
-    question = str(item["question"])
-    expected = [str(value) for value in item.get("expected_url_contains", [])]
+    question = str(item["question"])    
+    expected_groups = item.get("expected_source_groups") or []
     max_k = max(k_values)
-
-    if not expected:
-        # Le query senza fonte attesa servono per guardrail/fuori dominio.
-        # Non entrano nelle metriche retrieval perché non hanno un documento gold.
+    
+    if not expected_groups:
         return {
             "id": item.get("id"),
             "question": question,
-            "expected_url_contains": expected,
+            "expected_source_groups": expected_groups,
             "skipped": True,
             "reason": "no_expected_source",
         }
-
+    
     results = hybrid_retrieve(question, final_k=max_k)
-    relevances = [1 if is_relevant(result, expected) else 0 for result in results]
-
+    relevances = [1 if is_relevant(result, expected_groups) else 0 for result in results]
+    
     first_relevant_rank = None
     for index, relevance in enumerate(relevances, start=1):
         if relevance:
@@ -83,7 +106,7 @@ def evaluate_query(item: dict[str, Any], k_values: tuple[int, ...]) -> dict[str,
     return {
         "id": item.get("id"),
         "question": question,
-        "expected_url_contains": expected,
+        "expected_source_groups": expected_groups,
         "skipped": False,
         "mrr@10": 1.0 / first_relevant_rank if first_relevant_rank and first_relevant_rank <= 10 else 0.0,
         **per_k,
