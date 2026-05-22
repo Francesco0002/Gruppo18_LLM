@@ -5,6 +5,7 @@ from pathlib import Path
 from statistics import mean, median
 from urllib.parse import urlparse
 
+from pdf_policy import diem_rescue_upload_scope_reason
 from pipeline_io import (
     BASE_DIR,
     content_hash,
@@ -45,6 +46,12 @@ def is_valid_record(record: dict) -> bool:
     """
     Tiene solo i documenti utili per l'indicizzazione.
     """
+    if diem_rescue_upload_scope_reason(
+        str(record.get("url") or record.get("document_url") or ""),
+        str(record.get("discovered_from") or ""),
+    ):
+        return False
+
     return (
         record.get("status") == "ok"
         and record.get("indexable") is True

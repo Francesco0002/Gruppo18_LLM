@@ -205,7 +205,7 @@ def teaching_url(settings: CourseCatalogueSettings, teaching: dict[str, Any]) ->
     teaching_year = str(teaching.get("aa") or teaching.get("corso_aa") or "")
     teaching_id = str(teaching.get("cod") or "")
     ordinamento = str(teaching.get("ordinamento_aa") or "")
-    percorso = str(teaching.get("af_percorso_id") or teaching.get("corso_percorso_id") or "")
+    percorso = str(teaching.get("corso_percorso_id") or teaching.get("af_percorso_id") or "")
     query = {"coorte": coorte}
     if teaching.get("schemaId"):
         query["schemaid"] = str(teaching["schemaId"])
@@ -220,7 +220,7 @@ def teaching_api_url(settings: CourseCatalogueSettings, teaching: dict[str, Any]
     year = str(teaching.get("aa") or teaching.get("corso_aa") or "")
     teaching_id = str(teaching.get("cod") or "")
     ordinamento = str(teaching.get("ordinamento_aa") or "")
-    percorso_id = str(teaching.get("af_percorso_id") or teaching.get("corso_percorso_id") or "")
+    percorso_id = str(teaching.get("corso_percorso_id") or teaching.get("af_percorso_id") or "")
     course_id = str(teaching.get("corso_cod") or "")
     return (
         f"{settings.base_url}/api/v1/insegnamento-offerta/"

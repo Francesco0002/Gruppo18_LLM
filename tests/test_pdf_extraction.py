@@ -178,6 +178,25 @@ class AsyncPdfExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["reused_raw"])
         self.assertFalse(result["network_downloaded"])
 
+    async def test_untrusted_diem_rescue_pdf_is_rejected_before_raw_cache_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = base_config(temp_dir)
+            settings = load_pdf_runtime_settings(config)
+            output_path = Path(temp_dir) / "ab" / "abc123.pdf"
+            output_path.parent.mkdir(parents=True)
+            output_path.write_bytes(b"%PDF-1.7\ncached")
+            record = pdf_record(
+                "https://www.diem.unisa.it/uploads/rescue/292/14149/rep-196-prot-46039-bando-borsa-savarese-dipmed-2026-bs07.pdf"
+            )
+            record["discovered_from"] = "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=139&struttura=300400"
+
+            async with httpx.AsyncClient() as client:
+                result = await download_pdf_async(record, config, client, settings)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_kind"], "out_of_scope_pdf")
+        self.assertIn("diem_rescue_upload_untrusted", result["error"])
+
     async def test_force_reextract_downloads_even_when_raw_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = base_config(temp_dir)

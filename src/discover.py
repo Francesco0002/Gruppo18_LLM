@@ -25,7 +25,7 @@ import json
 from collections import Counter, deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from tqdm import tqdm
@@ -46,12 +46,19 @@ from discovery_io import (
 from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState, ProcessedDiscoveryItem
 from discovery_processor import filter_context, process_item
 from pipeline_io import now_iso
+from pdf_policy import DIEM_BANDI_STRUCTURED_MODULES, DIEM_BANDI_UNSTRUCTURED_MODULES
 from url_filters import can_traverse_url, is_pdf_url
 from url_filters import (
+    DIEM_BANDI_STRUCTURE_ID,
+    directory_person_matricola,
     is_diem_personnel_url,
     is_directory_person_url,
+    normalize_url,
     teacher_profile_key,
 )
+
+
+DIEM_BANDI_ARCHIVE_START_YEAR = 2013
 
 
 def count_items_by_depth(
@@ -182,14 +189,140 @@ def due_bootstrap_items(
     items: list[CrawlItem] = []
     for url in urls:
         last_seen = persistent_state.known_urls.get(url)
-        if last_seen and config is not None and not is_due_for_refresh(
-            last_seen,
-            config,
-            reference_time,
+        if (
+            last_seen
+            and url in persistent_state.known_documents
+            and config is not None
+            and not is_due_for_refresh(
+                last_seen,
+                config,
+                reference_time,
+            )
         ):
             continue
         items.append(CrawlItem(url, 0, source, origin_seed=url))
     return items
+
+
+def missing_teacher_profile_items(
+    persistent_state: PersistentDiscoveryState,
+    config: dict,
+) -> tuple[list[CrawlItem], set[str]]:
+    """Accoda profili docente numerici mancanti partendo da rubrica gia' validata.
+
+    Se una run precedente ha indicizzato la scheda rubrica DIEM ma ha saltato il
+    profilo `docenti.unisa.it/<matricola>/home`, la frontier puo' essere vuota:
+    questo backfill ricostruisce solo quei profili partendo da documenti rubrica
+    gia' entrati nello scope.
+    """
+    teacher_domain = str(
+        config.get("scope", {}).get("teacher_domain", "docenti.unisa.it")
+    ).lower()
+    items: list[CrawlItem] = []
+    allowed_profiles: set[str] = set()
+
+    for directory_url in sorted(persistent_state.known_documents):
+        matricola = directory_person_matricola(directory_url, config)
+        if not matricola:
+            continue
+
+        profile_url = normalize_url(f"https://{teacher_domain}/{matricola}/home")
+        if profile_url in persistent_state.known_documents:
+            continue
+
+        allowed_profiles.add(matricola.lower())
+        items.append(
+            CrawlItem(
+                profile_url,
+                0,
+                directory_url,
+                origin_seed=directory_url,
+            )
+        )
+
+    return items, allowed_profiles
+
+
+def diem_bandi_archive_urls(
+    config: dict,
+    reference_time: datetime | None = None,
+) -> list[str]:
+    """URL espliciti per archiviare tutte le sezioni bandi DIEM per anno."""
+    crawler_config = config.get("crawler", {})
+    if not crawler_config.get("include_diem_bandi_archives", True):
+        return []
+
+    start_year = int(
+        crawler_config.get(
+            "diem_bandi_archive_start_year",
+            DIEM_BANDI_ARCHIVE_START_YEAR,
+        )
+    )
+    end_year = int(
+        crawler_config.get(
+            "diem_bandi_archive_end_year",
+            (reference_time or datetime.now(UTC)).year,
+        )
+    )
+    if start_year > end_year:
+        return []
+
+    diem_domain = str(
+        config.get("scope", {}).get("diem_domain", "www.diem.unisa.it")
+    ).lower()
+    structure_id = str(
+        config.get("scope", {}).get("diem_bandi_structure_id", DIEM_BANDI_STRUCTURE_ID)
+    )
+    base_url = f"https://{diem_domain}/home/bandi"
+    modules: list[tuple[str, str | None]] = [
+        *sorted(DIEM_BANDI_STRUCTURED_MODULES.items()),
+        *((module, None) for module in sorted(DIEM_BANDI_UNSTRUCTURED_MODULES)),
+    ]
+
+    urls: list[str] = []
+    for module, structure_param in modules:
+        base_params = {"modulo": module}
+        if structure_param is not None:
+            query_param = (
+                "cdsStruttura"
+                if structure_param == "cdsstruttura"
+                else structure_param
+            )
+            base_params[query_param] = structure_id
+        urls.append(normalize_url(f"{base_url}?{urlencode(base_params)}"))
+
+        for year in range(end_year, start_year - 1, -1):
+            params = {"anno": str(year), **base_params}
+            urls.append(normalize_url(f"{base_url}?{urlencode(params)}"))
+
+    return urls
+
+
+def missing_diem_bandi_archive_items(
+    persistent_state: PersistentDiscoveryState,
+    config: dict,
+    reference_time: datetime | None = None,
+) -> list[CrawlItem]:
+    """Backfill dei bandi annuali, indipendente dai link oggi visibili."""
+    return due_bootstrap_items(
+        diem_bandi_archive_urls(config, reference_time),
+        "diem_bandi_archive",
+        persistent_state,
+        config,
+        reference_time,
+    )
+
+
+def has_diem_bandi_seed(seed_urls: list[str], config: dict) -> bool:
+    """True se i seed dichiarano che la sezione bandi DIEM fa parte del crawl."""
+    diem_domain = str(
+        config.get("scope", {}).get("diem_domain", "www.diem.unisa.it")
+    ).lower()
+    return any(
+        urlparse(url).netloc.lower() == diem_domain
+        and urlparse(url).path.rstrip("/").lower() == "/home/bandi"
+        for url in seed_urls
+    )
 
 
 def create_initial_state(
@@ -211,6 +344,21 @@ def create_initial_state(
     initial_items.extend(
         due_bootstrap_items(sitemap_urls, "sitemap", persistent_state, config, reference_time)
     )
+    backfill_teacher_profiles: set[str] = set()
+    if config is not None:
+        backfill_items, backfill_teacher_profiles = missing_teacher_profile_items(
+            persistent_state,
+            config,
+        )
+        initial_items.extend(backfill_items)
+        if has_diem_bandi_seed(seed_urls, config):
+            initial_items.extend(
+                missing_diem_bandi_archive_items(
+                    persistent_state,
+                    config,
+                    reference_time,
+                )
+            )
 
     deduped_items: list[CrawlItem] = []
     seen_urls: set[str] = set()
@@ -229,7 +377,10 @@ def create_initial_state(
         domain_counts=Counter(),
         known_urls=dict(persistent_state.known_urls),
         known_documents=dict(persistent_state.known_documents),
-        allowed_teacher_profiles=set(persistent_state.allowed_teacher_profiles),
+        allowed_teacher_profiles={
+            *persistent_state.allowed_teacher_profiles,
+            *backfill_teacher_profiles,
+        },
         expansion_backlog={item.url: item for item in persistent_state.expansion_backlog},
     )
 
@@ -269,10 +420,16 @@ def visit_skip_reason(
     if item.url in state.visited:
         return "already_visited"
 
-    if not item.force_revisit and item.url in state.known_urls and not is_due_for_refresh(
-        state.known_urls[item.url],
-        config,
-        reference_time,
+    has_known_document = item.url in state.known_documents
+    if (
+        not item.force_revisit
+        and item.url in state.known_urls
+        and has_known_document
+        and not is_due_for_refresh(
+            state.known_urls[item.url],
+            config,
+            reference_time,
+        )
     ):
         return "recently_known"
 
@@ -414,7 +571,11 @@ def enqueue_links(
 
         if link in state.visited or link in state.queued:
             continue
-        if link in state.known_urls and not is_due_for_refresh(state.known_urls[link], config):
+        if (
+            link in state.known_urls
+            and link in state.known_documents
+            and not is_due_for_refresh(state.known_urls[link], config)
+        ):
             continue
         state.queue.append(
             CrawlItem(

@@ -251,3 +251,4 @@ tests/test_clean_pipeline.py
 tests/test_pdf_backfill.py
 data/vectorstore/
 src/clean_pipeline.py
+backups/

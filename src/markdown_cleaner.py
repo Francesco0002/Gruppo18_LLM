@@ -114,9 +114,17 @@ def is_empty_structured_pdf(markdown: str) -> bool:
     return residual_chars < MIN_INDEXABLE_CHARS
 
 
-def clean_markdown_body(markdown: str, source: ProcessedSource) -> tuple[str, list[str]]:
+def clean_markdown_body(
+    markdown: str,
+    source: ProcessedSource,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[str, list[str]]:
     """Rimuove boilerplate noto e normalizza layout mantenendo il contenuto."""
     warnings: list[str] = []
+    metadata = metadata or {}
+    is_teacher_profile = (
+        source == "html" and metadata.get("source_family") == "teacher_profile"
+    )
     normalized = normalize_br(markdown).replace("\r\n", "\n").replace("\r", "\n")
     lines = normalized.split("\n")
     cleaned_lines: list[str] = []
@@ -147,6 +155,11 @@ def clean_markdown_body(markdown: str, source: ProcessedSource) -> tuple[str, li
             continue
 
         if source == "html" and any(stripped.startswith(starter) for starter in FOOTER_STARTERS):
+            footer_started = True
+            removed_boilerplate += 1
+            continue
+
+        if is_teacher_profile and stripped == "* Docenti":
             footer_started = True
             removed_boilerplate += 1
             continue
@@ -234,7 +247,7 @@ def clean_markdown(
     metadata: dict[str, Any],
 ) -> tuple[str, str, MarkdownQuality]:
     """Ritorna corpo pulito, markdown con front matter e qualita."""
-    clean_body, warnings = clean_markdown_body(raw_markdown, source)
+    clean_body, warnings = clean_markdown_body(raw_markdown, source, metadata)
     if source == "pdf" and is_empty_structured_pdf(clean_body):
         warnings.append("empty_structured_pdf")
     quality = build_quality(raw_markdown, clean_body, warnings)

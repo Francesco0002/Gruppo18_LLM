@@ -354,6 +354,13 @@ def download_pdf(
     url = normalize_url(record["url"])
     url_hash = record["hash"]
     output_path = raw_pdf_path(url_hash, config)
+    allowed, reason = pdf_target_is_allowed(record, url, config)
+    if not allowed:
+        return pdf_error_download(
+            record,
+            "out_of_scope_pdf",
+            f"out_of_scope_pdf:{reason}",
+        )
 
     # Il riuso dei raw evita download ripetuti nelle riesecuzioni incrementali.
     # `force_reextract` permette comunque di invalidare volontariamente la cache.
@@ -428,6 +435,13 @@ async def download_pdf_async(
     url = normalize_url(record["url"])
     url_hash = record["hash"]
     output_path = raw_pdf_path(url_hash, config)
+    allowed, reason = pdf_target_is_allowed(record, url, config)
+    if not allowed:
+        return pdf_error_download(
+            record,
+            "out_of_scope_pdf",
+            f"out_of_scope_pdf:{reason}",
+        )
 
     # I raw validi gia presenti entrano direttamente nella coda di estrazione:
     # questa e la scorciatoia che rende economiche le run incrementali.
@@ -494,7 +508,7 @@ def extract_pdf_markdown(
 
 def base_manifest_record(record: DiscoveryRecord, status: str, crawled_at: str) -> ProcessedRecord:
     """Campi comuni dei record manifest PDF."""
-    return {
+    manifest_record = {
         "source": "pdf",
         "status": status,
         "url": record["url"],
@@ -502,6 +516,17 @@ def base_manifest_record(record: DiscoveryRecord, status: str, crawled_at: str) 
         "hash": record["hash"],
         "last_crawled": crawled_at,
     }
+    for key in (
+        "discovered_from",
+        "link_text",
+        "pdf_source_section",
+        "pdf_download_decision",
+        "pdf_match_keywords",
+        "robots_txt_denied",
+    ):
+        if key in record:
+            manifest_record[key] = record[key]
+    return manifest_record
 
 
 def pdf_text_failure_kind(clean_body: str, clean_warnings: list[str]) -> str | None:

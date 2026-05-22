@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,7 @@ def sample_course() -> dict:
                                         "corso_cod": "500838",
                                         "cdsCod": "IE128",
                                         "af_percorso_id": "9999",
+                                        "corso_percorso_id": "10002",
                                         "af_percorso_cod": "PDS0-2025",
                                         "periodo_didattico_it": "PRIMO SEMESTRE",
                                         "docenti": [
@@ -112,6 +114,29 @@ class CourseCatalogueTests(unittest.TestCase):
             settings.course_entries,
             (("2024", "500639"), ("2025", "500838")),
         )
+
+    def test_project_config_covers_course_catalogue_academic_years_2023_2026(self) -> None:
+        config = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+        settings = settings_from_config(config)
+        expected = {
+            ("2023", "500189"),
+            ("2023", "500639"),
+            ("2023", "500191"),
+            ("2023", "500648"),
+            ("2023", "500679"),
+            ("2024", "500189"),
+            ("2024", "500639"),
+            ("2024", "500191"),
+            ("2024", "500648"),
+            ("2024", "500679"),
+            ("2025", "500853"),
+            ("2025", "500838"),
+            ("2025", "500854"),
+            ("2025", "500878"),
+            ("2025", "500879"),
+        }
+
+        self.assertEqual(set(settings.course_entries), expected)
 
     def test_settings_keep_backward_compatible_year_id_cross_product(self) -> None:
         config = sample_config()
@@ -149,12 +174,12 @@ class CourseCatalogueTests(unittest.TestCase):
         self.assertEqual(
             teaching_api_url(settings, teaching),
             "https://unisa.coursecatalogue.cineca.it/api/v1/insegnamento-offerta/"
-            "2025/521891/2025/9999/500838",
+            "2025/521891/2025/10002/500838",
         )
         self.assertEqual(
             teaching_url(settings, teaching),
             "https://unisa.coursecatalogue.cineca.it/corsi/2025/500838/"
-            "insegnamenti/2025/521891/2025/9999?coorte=2025&schemaid=19391",
+            "insegnamenti/2025/521891/2025/10002?coorte=2025&schemaid=19391",
         )
 
     def test_teaching_markdown_includes_syllabus_and_teacher_ids(self) -> None:

@@ -25,7 +25,7 @@ from discovery_fetch import DomainRateLimiter, RobotsCache, fetch_discovery_cand
 from discovery_io import make_record
 from discovery_models import CrawlItem, FetchResult, ProcessedDiscoveryItem
 from html_utils import extract_canonical_from_soup, extract_link_entries_from_soup
-from pdf_policy import pdf_download_exception
+from pdf_policy import diem_rescue_upload_scope_reason, pdf_download_exception
 from pipeline_types import DiscoveryRecord
 from url_filters import can_index_url, can_traverse_url, is_diem_personnel_url, is_pdf_url
 
@@ -164,6 +164,21 @@ async def make_linked_pdf_records(
             parent_url,
             origin_seed=origin_seed,
         )
+        skip_reason = diem_rescue_upload_scope_reason(pdf_url, parent_url, config)
+        if skip_reason:
+            records.append(
+                make_pdf_record(
+                    item,
+                    "out_of_scope",
+                    final_url=pdf_url,
+                    discovery_method="html_link",
+                    link_text=link_text,
+                    skip_reason=skip_reason,
+                    robots_txt_denied=None,
+                )
+            )
+            continue
+
         allowed_by_policy, section, keywords, allowed_reason = pdf_download_exception(
             pdf_url,
             parent_url,

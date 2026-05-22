@@ -47,6 +47,11 @@ from crawl4ai import (  # noqa: E402
 )
 
 from discovery_io import load_config, project_path, validate_config  # noqa: E402
+from url_filters import (  # noqa: E402
+    index_policy_skip_reason,
+    teacher_profile_key,
+    teacher_section_from_url,
+)
 
 
 BATCH_SIZE = 100
@@ -114,6 +119,19 @@ def extract_title_and_breadcrumb(html: str) -> tuple[str | None, list[str]]:
             break
 
     return title, list(dict.fromkeys(breadcrumb))
+
+
+def teacher_metadata(url: str, config: dict) -> dict[str, str]:
+    """Metadata strutturati per le pagine docente."""
+    teacher_id = teacher_profile_key(url, config)
+    teacher_section = teacher_section_from_url(url, config)
+    if not teacher_id or not teacher_section:
+        return {}
+    return {
+        "source_family": "teacher_profile",
+        "teacher_id": teacher_id,
+        "teacher_section": teacher_section,
+    }
 
 
 def markdown_from_crawl4ai_direct(html: str, base_url: str) -> str:
@@ -194,7 +212,28 @@ async def process_html_record(
             "title": title,
             "breadcrumb": breadcrumb,
             "last_crawled": crawled_at,
+            **teacher_metadata(url, config),
         }
+        index_skip_reason = index_policy_skip_reason(url, config)
+        if index_skip_reason:
+            return {
+                "source": "html",
+                "status": "ok",
+                "url": url,
+                "document_url": record.get("document_url", url),
+                "hash": url_hash,
+                "raw_content_hash": content_hash(raw_markdown),
+                "raw_markdown_path": raw_output_path,
+                "raw_html_path": record["raw_path"],
+                "title": title,
+                "breadcrumb": breadcrumb,
+                "last_crawled": crawled_at,
+                "text_extracted": False,
+                "markdown_chars": 0,
+                "indexable": False,
+                "index_skip_reason": index_skip_reason,
+                **teacher_metadata(url, config),
+            }
         clean_body, index_markdown, quality = clean_markdown(
             raw_markdown,
             source="html",
