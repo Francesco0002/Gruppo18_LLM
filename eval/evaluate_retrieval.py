@@ -63,6 +63,34 @@ def is_relevant(result, expected_source_groups: list[list[str]]) -> bool:
             return True
 
     return False
+
+
+def matched_expected_group_indexes(result, expected_source_groups: list[list[str]]) -> set[int]:
+    """
+    Restituisce gli indici dei gruppi attesi coperti da un risultato.
+
+    Ogni gruppo rappresenta una fonte/pattern atteso.
+    Un gruppo è coperto se tutti i suoi pattern compaiono in URL, titolo,
+    breadcrumb o testo del risultato.
+    """
+    metadata = result.metadata or {}
+
+    url = url_for_result(result)
+    title = str(metadata.get("title") or "")
+    breadcrumb = str(metadata.get("breadcrumb") or metadata.get("breadcrumb_text") or "")
+    text = str(getattr(result, "text", "") or "")
+
+    haystack = f"{url} {title} {breadcrumb} {text}".lower()
+
+    matched: set[int] = set()
+
+    for group_index, group in enumerate(expected_source_groups):
+        normalized_group = [str(item).lower() for item in group if str(item).strip()]
+
+        if normalized_group and all(item in haystack for item in normalized_group):
+            matched.add(group_index)
+
+    return matched
   
 
 def dcg(relevances: list[int]) -> float:
@@ -97,12 +125,36 @@ def evaluate_query(item: dict[str, Any], k_values: tuple[int, ...]) -> dict[str,
 
     per_k = {}
     for k in k_values:
+        top_results = results[:k]
         top_relevances = relevances[:k]
-        ideal_relevances = sorted(relevances, reverse=True)[:k]
-        ideal_dcg = dcg(ideal_relevances)
-        per_k[f"recall@{k}"] = 1.0 if any(top_relevances) else 0.0
-        per_k[f"ndcg@{k}"] = dcg(top_relevances) / ideal_dcg if ideal_dcg else 0.0
 
+        covered_groups: set[int] = set()
+
+        for result in top_results:
+            covered_groups.update(
+                matched_expected_group_indexes(result, expected_groups)
+            )
+
+        # Hit@k: almeno una fonte attesa trovata nei primi k.
+        per_k[f"hit@{k}"] = 1.0 if covered_groups else 0.0
+
+        # Recall@k: quante fonti/pattern attesi sono stati coperti nei primi k.
+        per_k[f"recall@{k}"] = (
+            len(covered_groups) / len(expected_groups)
+            if expected_groups
+            else 0.0
+        )
+
+        # Precision@k: quanti risultati nei primi k sono rilevanti.
+        per_k[f"precision@{k}"] = sum(top_relevances) / k if k > 0 else 0.0
+
+        # nDCG@k: premia i risultati rilevanti messi più in alto.
+        ideal_relevant_count = min(sum(relevances), k)
+        ideal_relevances = [1] * ideal_relevant_count
+        ideal_dcg = dcg(ideal_relevances)
+
+        per_k[f"ndcg@{k}"] = dcg(top_relevances) / ideal_dcg if ideal_dcg else 0.0        
+    
     return {
         "id": item.get("id"),
         "question": question,
@@ -131,7 +183,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
     metric_names = [
         key
         for key in usable[0]
-        if key.startswith("recall@") or key.startswith("ndcg@") or key == "mrr@10"
+        if (
+            key.startswith("hit@")
+            or key.startswith("recall@")
+            or key.startswith("precision@")
+            or key.startswith("ndcg@")
+            or key == "mrr@10"
+        )
     ]
 
     return {
@@ -181,10 +239,10 @@ def write_markdown(report: dict[str, Any], path: Path) -> None:
 
     if len(report["runs"]) == 2:
         baseline, reranked = report["runs"]
-        base_recall = baseline["summary"].get("recall@5", 0.0)
-        new_recall = reranked["summary"].get("recall@5", 0.0)
-        delta = new_recall - base_recall
-        lines.append(f"Recall@5 delta: `{delta:.4f}`")
+        base_hit = baseline["summary"].get("hit@5", 0.0)
+        new_hit = reranked["summary"].get("hit@5", 0.0)
+        delta = new_hit - base_hit
+        lines.append(f"Hit@5 delta: `{delta:.4f}`")
         lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
