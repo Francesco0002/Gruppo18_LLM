@@ -7,21 +7,25 @@ from collections import Counter, deque
 from datetime import UTC, datetime
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from discover import (  # noqa: E402
     create_initial_state,
+    diem_bandi_archive_urls,
     discovery_stop_reason,
     enqueue_links,
     fair_bfs_order,
+    missing_diem_bandi_archive_items,
     take_batch,
     update_expansion_backlog,
 )
 from discovery_io import load_discovery_state, save_discovery_state  # noqa: E402
 from discovery_models import CrawlItem, CrawlState, PersistentDiscoveryState  # noqa: E402
 from discovery_processor import make_linked_pdf_records  # noqa: E402
+from html_utils import extract_link_entries_from_soup  # noqa: E402
 from url_filters import can_index_url, can_traverse_url  # noqa: E402
 
 
@@ -211,13 +215,11 @@ class DiscoveryControlTests(unittest.TestCase):
         )
         self.assertTrue(ok, reason)
 
-        # 'anno' su /ricerca/focus deve rimanere bloccato
         ok, reason = can_traverse_url(
             "https://www.diem.unisa.it/ricerca/focus?anno=2026",
             config,
         )
-        self.assertFalse(ok)
-        self.assertEqual(reason, "blocked_query")
+        self.assertTrue(ok, reason)
 
     def test_conto_terzi_progetto_is_traversable(self) -> None:
         config = base_config()
@@ -231,6 +233,64 @@ class DiscoveryControlTests(unittest.TestCase):
         # progetto su altri path generici (es: /home) deve rimanere bloccato
         ok, reason = can_traverse_url(
             "https://www.diem.unisa.it/home?progetto=66770",
+            config,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "blocked_query")
+
+    def test_conto_terzi_status_filters_are_indexable(self) -> None:
+        config = base_config()
+
+        for url in (
+            "https://www.diem.unisa.it/terza-missione/trasferimento-tecnologico/conto-terzi?stato=1",
+            "https://www.diem.unisa.it/terza-missione/trasferimento-tecnologico/conto-terzi?stato=0",
+        ):
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_diem_spin_off_incubator_filters_are_indexable(self) -> None:
+        config = base_config()
+
+        for url in (
+            "https://www.diem.unisa.it/terza-missione/trasferimento-tecnologico/spin-off?incubatore=1",
+            "https://www.diem.unisa.it/terza-missione/trasferimento-tecnologico/spin-off?incubatore=0",
+        ):
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/terza-missione/trasferimento-tecnologico/spin-off?incubatore=2",
+            config,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "blocked_query")
+
+    def test_diem_international_status_filters_are_indexable_for_diem_structure(self) -> None:
+        config = base_config()
+        urls = [
+            "https://www.diem.unisa.it/international/accordi-doppio-titolo?anno=&stato=attivi&struttura=300638",
+            "https://www.diem.unisa.it/international/accordi-erasmus-plus/traineeship?anno=&stato=scaduti&struttura=300638",
+            "https://www.diem.unisa.it/international/cooperazione-internazionale?anno=&stato=tutti&struttura=300638",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+        ok, reason = can_traverse_url(
+            "https://www.diem.unisa.it/international/accordi-doppio-titolo?anno=&stato=attivi&struttura=300400",
             config,
         )
         self.assertFalse(ok)
@@ -272,16 +332,607 @@ class DiscoveryControlTests(unittest.TestCase):
         config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
         context = {
             "discovered_from": "seed",
-            "allowed_teacher_profiles": {"antonio.parziale"},
+            "allowed_teacher_profiles": {"058553"},
         }
 
         ok, reason = can_traverse_url(
-            "https://docenti.unisa.it/antonio.parziale",
+            "https://docenti.unisa.it/058553/home",
             config,
             context,
         )
 
         self.assertTrue(ok, reason)
+
+    def test_teacher_numeric_subpages_are_limited_to_same_profile(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+
+        same_profile_context = {
+            "discovered_from": "https://docenti.unisa.it/058553/home",
+            "allowed_teacher_profiles": {"antonio.parziale"},
+        }
+        ok, reason = can_traverse_url(
+            "https://docenti.unisa.it/058553/curriculum",
+            config,
+            same_profile_context,
+        )
+        self.assertTrue(ok, reason)
+
+        other_profile_context = {
+            "discovered_from": "https://docenti.unisa.it/058553/home",
+            "allowed_teacher_profiles": {"antonio.parziale"},
+        }
+        ok, reason = can_traverse_url(
+            "https://docenti.unisa.it/004491/curriculum",
+            config,
+            other_profile_context,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "scope_teacher")
+
+    def test_authorized_rubrica_link_uses_numeric_teacher_profile(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].extend(
+            ["rubrica.unisa.it", "docenti.unisa.it"]
+        )
+        config["crawler"]["per_domain_limits"]["rubrica.unisa.it"] = 10
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        config["scope"]["directory_domain"] = "rubrica.unisa.it"
+        html = '<a href="https://docenti.unisa.it/diego.gragnaniello">WEB</a>'
+
+        links = extract_link_entries_from_soup(
+            BeautifulSoup(html, "lxml"),
+            "https://rubrica.unisa.it/persone?matricola=058553",
+            config,
+            allowed_teacher_profiles=set(),
+            authorized_directory_bridge=True,
+        )
+
+        self.assertEqual(
+            [link["url"] for link in links],
+            ["https://docenti.unisa.it/058553/home"],
+        )
+
+    def test_teacher_query_sections_are_not_traversed(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/058553/ricerca/pubblicazioni",
+            "allowed_teacher_profiles": {"058553"},
+        }
+
+        ok, reason = can_traverse_url(
+            "https://docenti.unisa.it/058553/ricerca/pubblicazioni?anno=2025&tip=262",
+            config,
+            context,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "scope_teacher")
+
+    def test_teacher_publications_all_years_query_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/058553/ricerca/pubblicazioni",
+            "allowed_teacher_profiles": {"058553"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/058553/ricerca/pubblicazioni?anno=0",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/058553/ricerca/pubblicazioni?anno=0",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_historical_didactics_query_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/027233/didattica",
+            "allowed_teacher_profiles": {"027233"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/027233/didattica?anno=2021",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/027233/didattica?anno=2021",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_lesson_schedule_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/027233/didattica",
+            "allowed_teacher_profiles": {"027233"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/027233/didattica/orari?include=docente",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/027233/didattica/orari?include=docente",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_project_detail_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/027233/ricerca/progetti",
+            "allowed_teacher_profiles": {"027233"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/027233/ricerca/progetti?progetto=59185",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/027233/ricerca/progetti?progetto=59185",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_spin_off_detail_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/027233/ricerca/spin-off",
+            "allowed_teacher_profiles": {"027233"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/027233/ricerca/spin-off?id=101",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/027233/ricerca/spin-off?id=101",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_laboratories_are_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/027233/ricerca",
+            "allowed_teacher_profiles": {"027233"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/027233/ricerca/laboratori",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/027233/ricerca/laboratori",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_laboratory_detail_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/001366/ricerca/laboratori",
+            "allowed_teacher_profiles": {"001366"},
+        }
+        url = "https://docenti.unisa.it/001366/ricerca/laboratori?id=722"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config, context)
+        index_ok, index_reason = can_index_url(url, config, context)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_patents_focus_and_research_awards_are_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/004294/ricerca",
+            "allowed_teacher_profiles": {"004294"},
+        }
+        urls = [
+            "https://docenti.unisa.it/004294/ricerca/brevetti",
+            "https://docenti.unisa.it/004294/ricerca/brevetti?id=123",
+            "https://docenti.unisa.it/004294/ricerca/premi-ricerca",
+            "https://docenti.unisa.it/004294/ricerca/premi-ricerca?anno=2015",
+            "https://docenti.unisa.it/004294/ricerca/focus",
+            "https://docenti.unisa.it/004294/ricerca/focus?id=42",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config, context)
+                index_ok, index_reason = can_index_url(url, config, context)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_projects_all_roles_query_is_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/058553/ricerca/progetti",
+            "allowed_teacher_profiles": {"058553"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/058553/ricerca/progetti?ruolo=tutti",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/058553/ricerca/progetti?ruolo=tutti",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_project_role_and_status_filters_are_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/003495/ricerca/progetti",
+            "allowed_teacher_profiles": {"003495"},
+        }
+        urls = [
+            "https://docenti.unisa.it/003495/ricerca/progetti?ruolo=responsabile",
+            "https://docenti.unisa.it/003495/ricerca/progetti?ruolo=componente",
+            "https://docenti.unisa.it/003495/ricerca/progetti?ruolo=responsabile&stato=1",
+            "https://docenti.unisa.it/003495/ricerca/progetti?ruolo=responsabile&stato=0",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config, context)
+                index_ok, index_reason = can_index_url(url, config, context)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_publications_landing_is_traversable_but_not_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/058553/ricerca",
+            "allowed_teacher_profiles": {"058553"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/058553/ricerca/pubblicazioni",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/058553/ricerca/pubblicazioni",
+            config,
+            context,
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "teacher_publications_landing")
+
+    def test_teacher_publication_year_archives_are_not_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/003495/home",
+            "allowed_teacher_profiles": {"003495"},
+        }
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            "https://docenti.unisa.it/003495/ricerca/pubblicazioni?anno=2025",
+            config,
+            context,
+        )
+        index_ok, index_reason = can_index_url(
+            "https://docenti.unisa.it/003495/ricerca/pubblicazioni?anno=2025",
+            config,
+            context,
+        )
+
+        self.assertFalse(traverse_ok)
+        self.assertEqual(traverse_reason, "scope_teacher")
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "scope_teacher")
+
+    def test_teacher_teaching_details_are_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/003495/home",
+            "allowed_teacher_profiles": {"003495"},
+        }
+        urls = [
+            "https://docenti.unisa.it/003495/didattica?anno=2023&id=515713",
+            "https://docenti.unisa.it/003495/didattica/orari",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config, context)
+                index_ok, index_reason = can_index_url(url, config, context)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_teacher_resources_notices_and_international_sections_are_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("docenti.unisa.it")
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        context = {
+            "discovered_from": "https://docenti.unisa.it/004294/home",
+            "allowed_teacher_profiles": {"004294"},
+        }
+        urls = [
+            "https://docenti.unisa.it/004294",
+            "https://docenti.unisa.it/004294/home?avvisi=1",
+            "https://docenti.unisa.it/004294/home?avviso=47893",
+            "https://docenti.unisa.it/004294/risorse?categoria=348",
+            "https://docenti.unisa.it/004294/risorse?categoria=336&risorsa=2",
+            "https://docenti.unisa.it/004294/international/erasmus",
+            "https://docenti.unisa.it/004294/international/traineeship",
+            "https://docenti.unisa.it/004294/international/dottorato-con-tesi-in-cotutela",
+            "https://docenti.unisa.it/004294/international/cooperazione-internazionale",
+            "https://docenti.unisa.it/004294/international/doppio-titolo",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config, context)
+                index_ok, index_reason = can_index_url(url, config, context)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_diem_bandi_department_lists_are_indexable(self) -> None:
+        config = base_config()
+        url = "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=139&struttura=300638"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+        index_ok, index_reason = can_index_url(url, config)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_historical_diem_bandi_department_module_is_indexable(self) -> None:
+        config = base_config()
+        url = "https://www.diem.unisa.it/home/bandi?anno=2023&struttura=300638&modulo=316"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+        index_ok, index_reason = can_index_url(url, config)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertTrue(index_ok, index_reason)
+
+    def test_diem_bandi_cds_structure_modules_are_indexable(self) -> None:
+        config = base_config()
+        urls = [
+            "https://www.diem.unisa.it/home/bandi?modulo=293&cdsStruttura=300638",
+            "https://www.diem.unisa.it/home/bandi?anno=2025&modulo=293&cdsStruttura=300638",
+            "https://www.diem.unisa.it/home/bandi?anno=2024&modulo=505&struttura=300638",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_diem_bandi_dottorati_lists_are_traversable_but_not_indexable(self) -> None:
+        config = base_config()
+        urls = [
+            "https://www.diem.unisa.it/home/bandi?modulo=226",
+            "https://www.diem.unisa.it/home/bandi?anno=2025&modulo=226",
+            "https://www.diem.unisa.it/home/bandi?anno=2025&bando=13933&modulo=226",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertFalse(index_ok)
+                self.assertEqual(index_reason, "noisy_bandi_query")
+
+    def test_diem_bandi_dottorati_detail_is_indexable_only_for_diem_concorso(self) -> None:
+        config = base_config()
+
+        allowed_url = "https://www.diem.unisa.it/home/bandi?bando=13933&anno=2025&modulo=226&idConcorso=9443"
+        other_department_url = "https://www.diem.unisa.it/home/bandi?bando=13933&anno=2025&modulo=226&idConcorso=9438"
+
+        for url, expected_indexable in (
+            (allowed_url, True),
+            (other_department_url, False),
+        ):
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertEqual(index_ok, expected_indexable)
+                if not expected_indexable:
+                    self.assertEqual(index_reason, "noisy_bandi_query")
+
+    def test_diem_doctorate_detail_links_are_extracted_only_for_diem_codes(self) -> None:
+        config = base_config()
+        config["scope"]["allowed_course_paths"] = ["DOT18CK8F9", "DOT229NLP9"]
+        soup = BeautifulSoup(
+            """
+            <a href="/home/bandi?bando=13933&anno=2025&modulo=226&idConcorso=9443">
+              DOT18CK8F9 INGEGNERIA DELL'INFORMAZIONE
+            </a>
+            <a href="/home/bandi?bando=13933&anno=2025&modulo=226&idConcorso=9438">
+              DOT227NLPN DATA SCIENCE, ACCOUNTING & MANAGEMENT
+            </a>
+            <a href="/home/bandi?anno=2025&modulo=226">Archivio 2025</a>
+            """,
+            "html.parser",
+        )
+
+        links = extract_link_entries_from_soup(
+            soup,
+            "https://www.diem.unisa.it/home/bandi?anno=2025&modulo=226",
+            config,
+        )
+
+        self.assertEqual(
+            [link["url"] for link in links],
+            [
+                "https://www.diem.unisa.it/home/bandi?anno=2025&bando=13933&idConcorso=9443&modulo=226",
+                "https://www.diem.unisa.it/home/bandi?anno=2025&modulo=226",
+            ],
+        )
+
+    def test_diem_bandi_detail_pages_remain_noisy_for_structured_modules(self) -> None:
+        config = base_config()
+        url = "https://www.diem.unisa.it/home/bandi?anno=2025&bando=13301&idConcorso=9089&modulo=139"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+        index_ok, index_reason = can_index_url(url, config)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "noisy_bandi_query")
+
+    def test_diem_bandi_category_pages_are_indexable_for_diem_structure(self) -> None:
+        config = base_config()
+        urls = [
+            "https://www.diem.unisa.it/home/bandi?anno=2026&categoria=258&cdsStruttura=300638&modulo=293",
+            "https://www.diem.unisa.it/home/bandi?anno=2026&categoria=176&modulo=67&struttura=300638",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_diem_bandi_category_pages_for_other_structures_are_blocked(self) -> None:
+        config = base_config()
+        url = "https://www.diem.unisa.it/home/bandi?anno=2026&categoria=176&modulo=67&struttura=300389"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+
+        self.assertFalse(traverse_ok)
+        self.assertEqual(traverse_reason, "blocked_query")
+
+    def test_noisy_diem_bandi_queries_are_traversable_but_not_indexable(self) -> None:
+        config = base_config()
+        noisy_urls = [
+            "https://www.diem.unisa.it/home/bandi?anno=2026&bando=14332&modulo=293",
+            "https://www.diem.unisa.it/home/bandi?struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?modulo=139&struttura=300638&page=2",
+        ]
+
+        for url in noisy_urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertFalse(index_ok)
+                self.assertEqual(index_reason, "noisy_bandi_query")
+
+    def test_historical_diem_sections_are_indexable(self) -> None:
+        config = base_config()
+        urls = [
+            "https://www.diem.unisa.it/didattica/offerta-formativa?anno=2020",
+            "https://www.diem.unisa.it/home/dati-di-monitoraggio?anno=2020",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                traverse_ok, traverse_reason = can_traverse_url(url, config)
+                index_ok, index_reason = can_index_url(url, config)
+
+                self.assertTrue(traverse_ok, traverse_reason)
+                self.assertTrue(index_ok, index_reason)
+
+    def test_bandi_other_department_lists_are_blocked(self) -> None:
+        config = base_config()
+        url = "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=139&struttura=300400"
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+        index_ok, index_reason = can_index_url(url, config)
+
+        self.assertFalse(traverse_ok)
+        self.assertEqual(traverse_reason, "blocked_query")
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "blocked_query")
+
+    def test_course_room_calendar_queries_are_traversable_but_not_indexable(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].append("corsi.unisa.it")
+        config["crawler"]["per_domain_limits"]["corsi.unisa.it"] = 10
+        config["scope"]["allowed_course_paths"] = ["ingegneria-informatica"]
+        url = (
+            "https://corsi.unisa.it/ingegneria-informatica/"
+            "strutture-didattiche/calendario-occupazione-spazi?aula=E&sede=F"
+        )
+
+        traverse_ok, traverse_reason = can_traverse_url(url, config)
+        index_ok, index_reason = can_index_url(url, config)
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertFalse(index_ok)
+        self.assertEqual(index_reason, "noisy_room_calendar_query")
 
     def test_diem_directory_contact_is_indexable_only_from_personnel_page(self) -> None:
         config = base_config()
@@ -467,6 +1118,152 @@ class DiscoveryControlTests(unittest.TestCase):
         self.assertEqual(records[0]["pdf_download_decision"], "allowed_opportunity_document")
         self.assertEqual(records[1]["status"], "robots_denied")
 
+    def test_diem_rescue_upload_bandi_from_diem_structure_are_in_scope(self) -> None:
+        config = base_config()
+        parent = "https://www.diem.unisa.it/home/bandi?anno=2023&struttura=300638&modulo=316"
+        urls = [
+            "https://www.diem.unisa.it/uploads/rescue/504/14120/50-2026-nomina-commissione-bando-tutorato-2026-fondi-aggiuntivi-disabili-2025-1-.pdf",
+            "https://www.diem.unisa.it/uploads/rescue/292/14172/bando-rep.-n.-69-del-13.02.2026.pdf",
+            "https://www.diem.unisa.it/uploads/rescue/292/14149/rep-196-prot-46039-bando-borsa-savarese-dipmed-2026-bs07.pdf",
+            "https://www.diem.unisa.it/uploads/rescue/292/14148/rep-299-prot-67529-d-comm-borsa-dipmed-2026-bs03.pdf",
+            "https://www.diem.unisa.it/uploads/rescue/292/14285/bs11-bando-fraternali..pdf",
+        ]
+
+        for url in urls:
+            ok, reason = can_traverse_url(url, config, {"discovered_from": parent})
+            self.assertTrue(ok, reason)
+
+    def test_diem_rescue_upload_bandi_from_other_structures_are_out_of_scope(self) -> None:
+        config = base_config()
+        parent = "https://www.diem.unisa.it/home/bandi?anno=2023&struttura=300400&modulo=316"
+        url = "https://www.diem.unisa.it/uploads/rescue/292/14172/bando-rep.-n.-69-del-13.02.2026.pdf"
+
+        ok, reason = can_traverse_url(url, config, {"discovered_from": parent})
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "diem_rescue_upload_untrusted")
+
+    def test_diem_rescue_upload_bandi_records_are_kept_for_diem_structure(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/292/14149/rep-196-prot-46039-bando-borsa-savarese-dipmed-2026-bs07.pdf",
+                        "text": "Bando",
+                    }
+                ],
+                "https://www.diem.unisa.it/home/bandi?anno=2023&struttura=300638&modulo=316",
+                1,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual(records[0]["status"], "pending_download")
+        self.assertEqual(records[0]["pdf_source_section"], "home_bandi")
+        self.assertEqual(records[0]["pdf_download_decision"], "allowed_opportunity_document")
+
+    def test_all_pdfs_from_explicit_diem_bandi_pages_are_kept(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/293/14107/locandina-viii-bando-tesi-di-laurea-2026.pdf",
+                        "text": "Locandina",
+                    },
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/226/13933/bando-di-concorso-xli-ciclo.pdf",
+                        "text": "Bando",
+                    },
+                ],
+                "https://www.diem.unisa.it/home/bandi?anno=2025&cdsStruttura=300638&modulo=293",
+                1,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+        dottorati_records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/226/13933/allegato-dottorati.pdf",
+                        "text": "Allegato",
+                    },
+                ],
+                "https://www.diem.unisa.it/home/bandi?anno=2025&modulo=226",
+                1,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual([record["status"] for record in records], ["pending_download"] * 2)
+        self.assertEqual(records[0]["pdf_download_decision"], "allowed_bandi_document")
+        self.assertEqual(records[1]["pdf_download_decision"], "allowed_opportunity_document")
+        self.assertEqual(dottorati_records[0]["status"], "out_of_scope")
+        self.assertEqual(
+            dottorati_records[0]["skip_reason"],
+            "diem_rescue_upload_untrusted",
+        )
+
+    def test_diem_doctorate_detail_pdfs_are_blocked_for_other_departments(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/151/9438/verbale-preliminare.pdf",
+                        "text": "Verbale preliminare",
+                    },
+                ],
+                "https://www.diem.unisa.it/home/bandi?bando=13933&anno=2025&modulo=226&idConcorso=9438",
+                1,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual(records[0]["status"], "out_of_scope")
+        self.assertEqual(
+            records[0]["skip_reason"],
+            "diem_rescue_upload_untrusted",
+        )
+
+    def test_diem_bandi_dottorati_detail_records_keep_pdfs(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [
+                    {
+                        "url": "https://www.diem.unisa.it/uploads/rescue/226/13933/bando-di-concorso-xli-ciclo-regione-campania-loghi.pdf",
+                        "text": "Bando di concorso",
+                    },
+                ],
+                "https://www.diem.unisa.it/home/bandi?bando=13933&anno=2025&modulo=226&idConcorso=9443",
+                1,
+                DenyRobots(),
+                base_config(),
+            )
+        )
+
+        self.assertEqual(records[0]["status"], "pending_download")
+        self.assertEqual(records[0]["pdf_source_section"], "home_bandi")
+        self.assertEqual(records[0]["pdf_download_decision"], "allowed_opportunity_document")
+
     def test_bandi_moduli_and_presentations_do_not_pass_as_main_opportunities(self) -> None:
         class DenyRobots:
             async def can_fetch(self, _url: str) -> bool:
@@ -637,7 +1434,8 @@ class DiscoveryControlTests(unittest.TestCase):
             records[0]["pdf_download_decision"],
             "allowed_didactic_focus_document",
         )
-        self.assertEqual(records[1]["status"], "robots_denied")
+        self.assertEqual(records[1]["status"], "out_of_scope")
+        self.assertEqual(records[1]["skip_reason"], "diem_rescue_upload_untrusted")
 
     def test_international_program_pdf_is_allowed_from_international_section(self) -> None:
         class DenyRobots:
@@ -660,6 +1458,41 @@ class DiscoveryControlTests(unittest.TestCase):
         )
 
         self.assertEqual(records[0]["status"], "pending_download")
+        self.assertEqual(
+            records[0]["pdf_download_decision"],
+            "allowed_international_program_document",
+        )
+
+    def test_international_rescue_pdf_endpoint_is_allowed_from_international_section(self) -> None:
+        class DenyRobots:
+            async def can_fetch(self, _url: str) -> bool:
+                return False
+
+        config = base_config()
+        parent = "https://www.diem.unisa.it/international/accordi-erasmus-plus"
+        pdf_url = (
+            "https://www.diem.unisa.it/unisa-rescue-page/pdf/id/1463/module/209"
+            "?paese=&struttura=300638&matricola="
+        )
+
+        traverse_ok, traverse_reason = can_traverse_url(
+            pdf_url,
+            config,
+            {"discovered_from": parent},
+        )
+        records = asyncio.run(
+            make_linked_pdf_records(
+                [{"url": pdf_url, "text": "PDF"}],
+                parent,
+                1,
+                DenyRobots(),
+                config,
+            )
+        )
+
+        self.assertTrue(traverse_ok, traverse_reason)
+        self.assertEqual(records[0]["status"], "pending_download")
+        self.assertEqual(records[0]["pdf_source_section"], "international")
         self.assertEqual(
             records[0]["pdf_download_decision"],
             "allowed_international_program_document",
@@ -790,6 +1623,7 @@ class DiscoveryControlTests(unittest.TestCase):
             seen_documents=set(),
             domain_counts=Counter(),
             known_urls={item.url: "2026-05-16T00:00:00+00:00"},
+            known_documents={item.url: "2026-05-16T00:00:00+00:00"},
         )
         skip_counts: Counter[str] = Counter()
 
@@ -802,6 +1636,47 @@ class DiscoveryControlTests(unittest.TestCase):
 
         self.assertEqual(batch, [])
         self.assertEqual(skip_counts, {"recently_known": 1})
+
+    def test_recent_known_url_without_document_can_be_retried(self) -> None:
+        item = CrawlItem("https://www.diem.unisa.it/retry", 1, "parent")
+        state = CrawlState(
+            queue=deque([item]),
+            queued={item.url},
+            visited=set(),
+            seen_documents=set(),
+            domain_counts=Counter(),
+            known_urls={item.url: "2026-05-16T00:00:00+00:00"},
+            known_documents={},
+        )
+
+        batch = take_batch(
+            state,
+            base_config(),
+            reference_time=datetime(2026, 5, 16, tzinfo=UTC),
+        )
+
+        self.assertEqual(batch, [item])
+
+    def test_recent_known_document_is_not_requeued_from_links(self) -> None:
+        parent = CrawlItem("https://www.diem.unisa.it/parent", 0, "seed")
+        known = "https://www.diem.unisa.it/known"
+        retry = "https://www.diem.unisa.it/retry"
+        state = CrawlState(
+            queue=deque(),
+            queued=set(),
+            visited=set(),
+            seen_documents=set(),
+            domain_counts=Counter(),
+            known_urls={
+                known: "2026-05-16T00:00:00+00:00",
+                retry: "2026-05-16T00:00:00+00:00",
+            },
+            known_documents={known: "2026-05-16T00:00:00+00:00"},
+        )
+
+        enqueue_links(parent, [known, retry], state, base_config())
+
+        self.assertEqual([item.url for item in state.queue], [retry])
 
     def test_domain_limited_urls_remain_in_frontier_for_future_runs(self) -> None:
         item = CrawlItem("https://www.diem.unisa.it/pending", 4, "parent")
@@ -860,6 +1735,56 @@ class DiscoveryControlTests(unittest.TestCase):
         self.assertEqual(skip_counts, {"blocked_query": 1})
         self.assertEqual(skip_counts_by_depth, {("blocked_query", 1): 1})
 
+    def test_diem_bandi_archive_urls_cover_all_target_sections_and_years(self) -> None:
+        config = base_config()
+        config["crawler"]["diem_bandi_archive_start_year"] = 2025
+        reference_time = datetime(2026, 5, 22, tzinfo=UTC)
+
+        urls = diem_bandi_archive_urls(config, reference_time)
+
+        expected = {
+            "https://www.diem.unisa.it/home/bandi?modulo=139&struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?anno=2025&modulo=139&struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?modulo=504&struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?modulo=316&struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?modulo=226",
+            "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=226",
+            "https://www.diem.unisa.it/home/bandi?modulo=67&struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?modulo=292&struttura=300638",
+            "https://www.diem.unisa.it/home/bandi?cdsStruttura=300638&modulo=293",
+            "https://www.diem.unisa.it/home/bandi?anno=2025&cdsStruttura=300638&modulo=293",
+            "https://www.diem.unisa.it/home/bandi?modulo=505&struttura=300638",
+        }
+
+        self.assertTrue(expected <= set(urls))
+
+    def test_missing_diem_bandi_archives_are_bootstrapped_without_readding_recent_documents(self) -> None:
+        config = base_config()
+        config["crawler"]["diem_bandi_archive_start_year"] = 2026
+        known = "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=139&struttura=300638"
+        persistent = PersistentDiscoveryState(
+            frontier=deque(),
+            known_urls={known: "2026-05-20T00:00:00+00:00"},
+            known_documents={known: "2026-05-20T00:00:00+00:00"},
+        )
+
+        items = missing_diem_bandi_archive_items(
+            persistent,
+            config,
+            datetime(2026, 5, 22, tzinfo=UTC),
+        )
+        urls = [item.url for item in items]
+
+        self.assertNotIn(known, urls)
+        self.assertIn(
+            "https://www.diem.unisa.it/home/bandi?anno=2026&modulo=226",
+            urls,
+        )
+        self.assertIn(
+            "https://www.diem.unisa.it/home/bandi?anno=2026&cdsStruttura=300638&modulo=293",
+            urls,
+        )
+
     def test_depth_increase_requeues_boundary_pages_for_forced_revisit(self) -> None:
         boundary = CrawlItem("https://www.diem.unisa.it/a", 1, "parent")
         persistent = PersistentDiscoveryState(
@@ -882,7 +1807,7 @@ class DiscoveryControlTests(unittest.TestCase):
         persistent = PersistentDiscoveryState(
             frontier=deque([pending]),
             known_urls={seed: "2026-05-16T00:00:00+00:00"},
-            known_documents={},
+            known_documents={seed: "2026-05-16T00:00:00+00:00"},
         )
 
         state = create_initial_state(
@@ -895,6 +1820,77 @@ class DiscoveryControlTests(unittest.TestCase):
         )
 
         self.assertEqual(list(state.queue), [pending])
+
+    def test_recent_seed_without_document_is_requeued(self) -> None:
+        seed = "https://www.diem.unisa.it/"
+        persistent = PersistentDiscoveryState(
+            frontier=deque(),
+            known_urls={seed: "2026-05-16T00:00:00+00:00"},
+            known_documents={},
+        )
+
+        state = create_initial_state(
+            [seed],
+            [],
+            persistent,
+            max_depth=3,
+            config=base_config(),
+            reference_time=datetime(2026, 5, 16, tzinfo=UTC),
+        )
+
+        self.assertEqual([item.url for item in state.queue], [seed])
+
+    def test_missing_teacher_profiles_from_known_rubrica_are_bootstrapped(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].extend(
+            ["rubrica.unisa.it", "docenti.unisa.it"]
+        )
+        config["crawler"]["per_domain_limits"]["rubrica.unisa.it"] = 10
+        config["crawler"]["per_domain_limits"]["docenti.unisa.it"] = 10
+        config["scope"]["directory_domain"] = "rubrica.unisa.it"
+        directory_url = "https://rubrica.unisa.it/persone?matricola=058553"
+        profile_url = "https://docenti.unisa.it/058553/home"
+        persistent = PersistentDiscoveryState(
+            frontier=deque(),
+            known_urls={
+                directory_url: "2026-05-16T00:00:00+00:00",
+                profile_url: "2026-05-16T00:00:00+00:00",
+            },
+            known_documents={directory_url: "2026-05-16T00:00:00+00:00"},
+        )
+
+        state = create_initial_state(
+            [],
+            [],
+            persistent,
+            max_depth=4,
+            config=config,
+            reference_time=datetime(2026, 5, 16, tzinfo=UTC),
+        )
+
+        self.assertEqual([item.url for item in state.queue], [profile_url])
+        self.assertIn("058553", state.allowed_teacher_profiles)
+
+    def test_known_teacher_document_is_not_bootstrapped_from_rubrica(self) -> None:
+        config = base_config()
+        config["crawler"]["allowed_domains"].extend(
+            ["rubrica.unisa.it", "docenti.unisa.it"]
+        )
+        config["scope"]["directory_domain"] = "rubrica.unisa.it"
+        directory_url = "https://rubrica.unisa.it/persone?matricola=058553"
+        profile_url = "https://docenti.unisa.it/058553/home"
+        persistent = PersistentDiscoveryState(
+            frontier=deque(),
+            known_urls={directory_url: "2026-05-16T00:00:00+00:00"},
+            known_documents={
+                directory_url: "2026-05-16T00:00:00+00:00",
+                profile_url: "2026-05-16T00:00:00+00:00",
+            },
+        )
+
+        state = create_initial_state([], [], persistent, max_depth=4, config=config)
+
+        self.assertEqual(list(state.queue), [])
 
     def test_forced_revisit_bypasses_refresh_window(self) -> None:
         item = CrawlItem("https://www.diem.unisa.it/a", 1, "parent", force_revisit=True)

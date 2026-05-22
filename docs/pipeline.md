@@ -115,7 +115,17 @@ whitelist dei profili `docenti.unisa.it` autorizzati. Un profilo entra in questa
 lista solo se viene scoperto dalla pagina `dipartimento/personale` o dal ponte
 `rubrica.unisa.it/persone?...` raggiunto da quella pagina. Dopo l'ingresso, il
 crawler può navigare solo le sottopagine dello stesso profilo; link verso altri
-docenti non autorizzati restano fuori scope.
+docenti non autorizzati restano fuori scope. Quando la rubrica espone un link
+testuale `docenti.unisa.it/nome.cognome`, la discovery usa la matricola già
+presente nella pagina rubrica e lo normalizza in
+`docenti.unisa.it/<matricola>/home`, evitando la lista globale dei docenti.
+Per limitare il rumore nel corpus, i profili docente sono attraversabili solo
+nelle sezioni principali: `home`, `curriculum`, `ricerca`, `didattica`,
+`risorse`, `ricerca/pubblicazioni` e `ricerca/progetti`. Per le pubblicazioni
+resta ammessa anche la vista aggregata `?anno=0`, e per i progetti la vista
+aggregata `?ruolo=tutti`; varianti massive per anno specifico, tipologia,
+insegnamento o ruolo parziale restano fuori dalla discovery e dall'indice
+testuale.
 
 Le pagine `rubrica.unisa.it/persone?matricola=...` sono indicizzabili solo se
 scoperte da `www.diem.unisa.it/dipartimento/personale`, così i contatti dei
@@ -261,7 +271,20 @@ I PDF linkati dagli HTML vengono registrati subito in
 
 La regola ordinaria resta semplice: se `robots.txt` consente il download, il
 PDF riceve `status="pending_download"`; altrimenti riceve
-`status="robots_denied"`.
+`status="robots_denied"`. Fa eccezione il bucket condiviso
+`www.diem.unisa.it/uploads/rescue/`: questi PDF non sono considerati DIEM solo
+perché esposti dal dominio DIEM. Entrano nello scope soltanto quando il parent
+fornisce un legame verificabile, ad esempio un allegato di
+`/didattica/focus?id=...` con lo stesso identificativo nel path, oppure un
+calendario linkato da una rescue page didattica esplicita. Gli altri allegati
+rescue vengono scartati con `diem_rescue_upload_untrusted`.
+
+Se il manifest contiene gia record storici contaminanti, si corregge senza
+riscriverlo appendendo tombstone non indicizzabili:
+
+```bash
+python src/quarantine_rescue_pdfs.py
+```
 
 Esistono però deroghe PDF dedicate e volutamente strette per non perdere
 documenti utili alla RAG. Un PDF bloccato da `robots.txt` viene comunque ammesso
@@ -308,6 +331,12 @@ Responsabilità:
 - genera Markdown raw con Crawl4AI;
 - salva il raw in `data/processed/markdown_raw/<sh>/<hash>.md`;
 - pulisce boilerplate conservativo e aggiunge front matter YAML;
+- rimuove la sidebar ripetuta dei profili `docenti.unisa.it`;
+- arricchisce i profili docente con `source_family`, `teacher_id` e
+  `teacher_section`;
+- marca non indicizzabili le pagine traversabili ma rumorose, come query
+  massive dei docenti, query non DIEM o non informative di `home/bandi`,
+  paginazioni/ordinamenti tecnici e calendari di occupazione aule dei corsi;
 - salva il Markdown indicizzabile in `data/processed/markdown/<sh>/<hash>.md`;
 - aggiunge record a `data/processed/manifest.jsonl`;
 - salta URL HTML già processati negli ultimi 7 giorni.

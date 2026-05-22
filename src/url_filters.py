@@ -31,10 +31,41 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlencode, urldefrag, urlparse
 
+from pdf_policy import diem_rescue_upload_scope_reason, is_explicit_diem_bandi_url
+
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
 INVALID_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 TRACKING_QUERY_PARAMS = {"fbclid", "gclid", "msclkid"}
+TEACHER_MAIN_SECTIONS = {
+    "home",
+    "curriculum",
+    "ricerca",
+    "didattica",
+    "risorse",
+}
+TEACHER_RESEARCH_SECTIONS = {
+    "brevetti",
+    "focus",
+    "laboratori",
+    "premi",
+    "premi-ricerca",
+    "pubblicazioni",
+    "progetti",
+    "spin-off",
+}
+TEACHER_INTERNATIONAL_SECTIONS = {
+    "bip",
+    "cattedra-unesco",
+    "cooperazione-internazionale",
+    "doppio-titolo",
+    "dottorato-con-tesi-in-cotutela",
+    "eramus-teaching-docenza",
+    "erasmus",
+    "staff-training",
+    "traineeship",
+    "visiting-professors",
+}
 # Query bloccate di default: spesso generano filtri, viste tecniche o duplicati.
 BLOCKED_QUERY_PARAMS = {
     "archive",
@@ -46,10 +77,7 @@ BLOCKED_QUERY_PARAMS = {
     "stato",
 }
 # Eccezioni locali: alcuni parametri sono rumore solo su path specifici.
-BLOCKED_QUERY_BY_PATH = {
-    "/ricerca/focus": {"anno"},
-    "/ricerca/progetti-finanziati": {"tip"},
-}
+BLOCKED_QUERY_BY_PATH: dict[str, set[str]] = {}
 # Alcune pagine DIEM espongono filtri per tutte le strutture dell'ateneo.
 # Manteniamo solo la struttura DIEM, altrimenti la discovery esplode verso
 # bandi non pertinenti.
@@ -66,9 +94,12 @@ ALLOWED_QUERY_VALUES_BY_PATH = {
 }
 # Parametri informativi ammessi solo dove aprono un vero dettaglio.
 ALLOWED_QUERY_PARAMS_BY_PATH = {
-    "/ricerca/progetti-finanziati": {"progetto"},
-    "/terza-missione/trasferimento-tecnologico/conto-terzi": {"progetto"},
+    "/ricerca/progetti-finanziati": {"progetto", "stato"},
+    "/terza-missione/trasferimento-tecnologico/conto-terzi": {"progetto", "stato"},
 }
+ALLOWED_DIEM_SPIN_OFF_INCUBATOR_VALUES = {"0", "1"}
+ALLOWED_DIEM_STATUS_VALUES = {"0", "1", "attivi", "scaduti", "tutti"}
+ALLOWED_DIEM_INTERNATIONAL_STRUCTURE_ID = "300638"
 NO_INDEX_QUERY_PARAMS = {
     "page",
     "p",
@@ -80,6 +111,9 @@ NO_INDEX_QUERY_PARAMS = {
     "print",
     "sitemap",
 }
+DIEM_BANDI_STRUCTURE_PARAMS = {"struttura", "cdsstruttura"}
+DIEM_BANDI_INDEXABLE_QUERY_PARAMS = {"anno", "categoria", "modulo"} | DIEM_BANDI_STRUCTURE_PARAMS
+DIEM_BANDI_STRUCTURE_ID = "300638"
 
 BLOCKED_PATH_PARTS = (
     "/login",
@@ -251,7 +285,94 @@ def is_course_news_archive_query(url: str, name: str) -> bool:
 def has_allowed_query_param(url: str, name: str) -> bool:
     """True per parametri informativi consentiti solo su path specifici."""
     path = urlparse(url).path.lower().rstrip("/")
+    if is_teacher_detail_query_param(url, name):
+        return True
+    if is_diem_bandi_query_param(url, name):
+        return True
+    if is_diem_spin_off_query_param(url, name):
+        return True
+    if is_diem_international_query_param(url, name):
+        return True
     return name in ALLOWED_QUERY_PARAMS_BY_PATH.get(path, set())
+
+
+def is_teacher_detail_query_param(url: str, name: str) -> bool:
+    """True per query di dettaglio informative sulle schede docente."""
+    segments = path_segments(url)
+    if len(segments) < 2:
+        return False
+    if len(segments) == 2 and segments[1] == "home":
+        return name in {"avvisi", "avviso"}
+    if len(segments) == 2 and segments[1] == "risorse":
+        return name in {"categoria", "risorsa"}
+    if len(segments) == 2 and segments[1] == "didattica":
+        return name in {"anno", "id"}
+    if len(segments) < 3:
+        return False
+    if segments[1] == "ricerca" and segments[2] == "progetti":
+        return name in {"progetto", "ruolo", "stato"}
+    if segments[1] == "ricerca" and segments[2] == "spin-off":
+        return name in {"id", "incubatore"}
+    if segments[1] == "ricerca" and segments[2] == "laboratori":
+        return name == "id"
+    return False
+
+
+def is_diem_spin_off_query_param(url: str, name: str) -> bool:
+    """True per i filtri informativi della pagina spin-off DIEM."""
+    path = urlparse(url).path.lower().rstrip("/")
+    if path != "/terza-missione/trasferimento-tecnologico/spin-off":
+        return False
+    if name != "incubatore":
+        return False
+    values = query_params(url).get(name, [])
+    return bool(values) and all(
+        value in ALLOWED_DIEM_SPIN_OFF_INCUBATOR_VALUES
+        for value in values
+    )
+
+
+def is_diem_bandi_query_param(url: str, name: str) -> bool:
+    """True per sottocategorie bandi DIEM ancorate alla struttura corretta."""
+    path = urlparse(url).path.lower().rstrip("/")
+    if path != "/home/bandi" or name != "categoria":
+        return False
+    params = query_params(url)
+    structure_values = [
+        value
+        for structure_name in DIEM_BANDI_STRUCTURE_PARAMS
+        for value in params.get(structure_name, [])
+    ]
+    category_values = params.get("categoria", [])
+    return (
+        "modulo" in params
+        and structure_values == [DIEM_BANDI_STRUCTURE_ID]
+        and bool(category_values)
+        and all(value.isdigit() for value in category_values)
+    )
+
+
+def is_diem_international_query_param(url: str, name: str) -> bool:
+    """True per i filtri delle liste accordi internazionali DIEM."""
+    path = urlparse(url).path.lower().rstrip("/")
+    if not path.startswith("/international/"):
+        return False
+    if name not in {"anno", "stato", "struttura"}:
+        return False
+
+    params = query_params(url)
+    structure_values = params.get("struttura", [])
+    if not structure_values or any(
+        value != ALLOWED_DIEM_INTERNATIONAL_STRUCTURE_ID
+        for value in structure_values
+    ):
+        return False
+
+    status_values = params.get("stato", [])
+    if status_values and any(value not in ALLOWED_DIEM_STATUS_VALUES for value in status_values):
+        return False
+
+    return True
 
 
 def has_blocked_query(url: str) -> bool:
@@ -292,6 +413,44 @@ def has_noisy_query(url: str) -> bool:
     """True per query utili alla navigazione ma non all'indice."""
     params = query_param_names(url)
     return has_tracking_query(url) or bool(params & NO_INDEX_QUERY_PARAMS)
+
+
+def is_indexable_diem_bandi_url(url: str) -> bool:
+    """True per le liste bandi filtrate sulla sola struttura DIEM."""
+    parsed = urlparse(url)
+    path = parsed.path.lower().rstrip("/")
+    if path != "/home/bandi":
+        return False
+    if not parsed.query:
+        return True
+    return is_explicit_diem_bandi_url(url)
+
+
+def index_policy_skip_reason(url: str, config: dict) -> str | None:
+    """Motivo per cui un URL traversabile non deve entrare nel corpus testuale."""
+    parsed = urlparse(url)
+    path = parsed.path.lower().rstrip("/")
+    params = query_param_names(url)
+    domain = domain_of(url)
+
+    if domain == scope_value(config, "teacher_domain", "docenti.unisa.it"):
+        if not is_teacher_supported_content_url(url, config):
+            return "unsupported_teacher_section"
+        if is_teacher_publications_landing_url(url):
+            return "teacher_publications_landing"
+        return None
+
+    if domain == scope_value(config, "diem_domain", "www.diem.unisa.it"):
+        if parsed.query and path == "/home/bandi" and not is_indexable_diem_bandi_url(url):
+            return "noisy_bandi_query"
+
+    if domain == scope_value(config, "course_domain", "corsi.unisa.it"):
+        if parsed.query and path.endswith("/strutture-didattiche/calendario-occupazione-spazi"):
+            return "noisy_room_calendar_query"
+
+    if has_noisy_query(url):
+        return "noisy_query"
+    return None
 
 
 def has_blocked_path(url: str) -> bool:
@@ -374,6 +533,18 @@ def is_directory_person_url(url: str, config: dict) -> bool:
         and parsed.path.rstrip("/").lower() == "/persone"
         and "matricola" in query_param_names(url)
     )
+
+
+def directory_person_matricola(url: str, config: dict) -> str | None:
+    """Estrae la matricola da una pagina personale della rubrica UNISA."""
+    if not is_directory_person_url(url, config):
+        return None
+
+    for name, value in parse_qsl(urlparse(url).query, keep_blank_values=True):
+        if name.lower() == "matricola" and value:
+            return value
+    return None
+
 
 def configured_course_paths(config: dict) -> set[str]:
     """Percorsi corso ammessi come primo segmento di corsi.unisa.it.
@@ -555,6 +726,272 @@ def teacher_profile_key(url: str, config: dict) -> str | None:
     return first_path_segment(url) or None
 
 
+def teacher_section_from_url(url: str, config: dict) -> str | None:
+    """Sezione docente indicizzabile ricavata dal path del profilo."""
+    if domain_of(url) != scope_value(config, "teacher_domain", "docenti.unisa.it"):
+        return None
+
+    segments = path_segments(url)
+    if len(segments) < 2:
+        return None
+    if (
+        len(segments) >= 3
+        and segments[1] == "ricerca"
+        and segments[2] in TEACHER_RESEARCH_SECTIONS
+    ):
+        return segments[2]
+    if segments[1] in TEACHER_MAIN_SECTIONS:
+        return segments[1]
+    return None
+
+
+def query_params(url: str) -> dict[str, list[str]]:
+    """Query params normalizzati preservando valori multipli."""
+    params: dict[str, list[str]] = {}
+    for name, value in parse_qsl(urlparse(url).query, keep_blank_values=True):
+        params.setdefault(name.lower(), []).append(value.lower())
+    return params
+
+
+def has_exact_query_params(url: str, expected: dict[str, str]) -> bool:
+    """True se la query contiene esattamente i parametri attesi."""
+    params = query_params(url)
+    return params == {name: [value] for name, value in expected.items()}
+
+
+def is_teacher_publications_overview_url(url: str) -> bool:
+    """True per la vista aggregata esplicita delle pubblicazioni docente."""
+    segments = path_segments(url)
+    if len(segments) != 3 or segments[1] != "ricerca" or segments[2] != "pubblicazioni":
+        return False
+    return has_exact_query_params(url, {"anno": "0"})
+
+
+def is_teacher_publications_landing_url(url: str) -> bool:
+    """True per la landing pubblicazioni: attraversabile, non indicizzabile."""
+    segments = path_segments(url)
+    return (
+        len(segments) == 3
+        and segments[1] == "ricerca"
+        and segments[2] == "pubblicazioni"
+        and not urlparse(url).query
+    )
+
+
+def is_teacher_publications_year_url(url: str) -> bool:
+    """True per archivi annuali pubblicazioni, esclusi dal corpus DIEM."""
+    segments = path_segments(url)
+    return (
+        len(segments) == 3
+        and segments[1] == "ricerca"
+        and segments[2] == "pubblicazioni"
+        and has_single_numeric_query_param(url, "anno")
+    )
+
+
+def is_teacher_projects_overview_url(url: str) -> bool:
+    """True per la vista aggregata dei progetti del docente."""
+    segments = path_segments(url)
+    if len(segments) != 3 or segments[1] != "ricerca" or segments[2] != "progetti":
+        return False
+    return not urlparse(url).query or has_exact_query_params(url, {"ruolo": "tutti"})
+
+
+def is_teacher_projects_filtered_url(url: str) -> bool:
+    """True per filtri ruolo/stato dei progetti docente."""
+    segments = path_segments(url)
+    if len(segments) != 3 or segments[1] != "ricerca" or segments[2] != "progetti":
+        return False
+    params = query_params(url)
+    if not set(params) <= {"ruolo", "stato"}:
+        return False
+    role_values = params.get("ruolo", [])
+    if not role_values or any(
+        value not in {"responsabile", "componente", "tutti"}
+        for value in role_values
+    ):
+        return False
+    status_values = params.get("stato", [])
+    return not status_values or all(value in {"0", "1"} for value in status_values)
+
+
+def has_single_numeric_query_param(url: str, name: str) -> bool:
+    """True se la query contiene un solo parametro numerico con il nome dato."""
+    params = query_params(url)
+    return set(params) == {name} and len(params[name]) == 1 and params[name][0].isdigit()
+
+
+def is_teacher_didactics_url(url: str) -> bool:
+    """True per la didattica docente corrente o storica."""
+    segments = path_segments(url)
+    if len(segments) != 2 or segments[1] != "didattica":
+        return False
+    if not urlparse(url).query:
+        return True
+    return has_single_numeric_query_param(url, "anno")
+
+
+def is_teacher_teaching_detail_url(url: str) -> bool:
+    """True per la scheda di un singolo insegnamento docente."""
+    segments = path_segments(url)
+    if len(segments) != 2 or segments[1] != "didattica":
+        return False
+    params = query_params(url)
+    return (
+        set(params) == {"anno", "id"}
+        and len(params["anno"]) == 1
+        and len(params["id"]) == 1
+        and params["anno"][0].isdigit()
+        and params["id"][0].isdigit()
+    )
+
+
+def is_teacher_lesson_schedule_url(url: str) -> bool:
+    """True per l'orario lezioni del docente."""
+    segments = path_segments(url)
+    if len(segments) != 3 or segments[1] != "didattica" or segments[2] != "orari":
+        return False
+    return not urlparse(url).query or has_exact_query_params(url, {"include": "docente"})
+
+
+def is_teacher_project_detail_url(url: str) -> bool:
+    """True per una scheda progetto docente."""
+    segments = path_segments(url)
+    return (
+        len(segments) == 3
+        and segments[1] == "ricerca"
+        and segments[2] == "progetti"
+        and has_single_numeric_query_param(url, "progetto")
+    )
+
+
+def is_teacher_spin_off_url(url: str) -> bool:
+    """True per la lista o una scheda spin-off docente."""
+    segments = path_segments(url)
+    if len(segments) != 3 or segments[1] != "ricerca" or segments[2] != "spin-off":
+        return False
+    if not urlparse(url).query:
+        return True
+    params = query_params(url)
+    if has_single_numeric_query_param(url, "id"):
+        return True
+    return (
+        set(params) == {"incubatore"}
+        and len(params["incubatore"]) == 1
+        and params["incubatore"][0] in {"0", "1"}
+    )
+
+
+def is_teacher_research_query_url(url: str) -> bool:
+    """True per viste di dettaglio o archivio nelle sezioni ricerca docente."""
+    segments = path_segments(url)
+    if len(segments) != 3 or segments[1] != "ricerca":
+        return False
+    section = segments[2]
+    if section in {"brevetti", "focus"}:
+        return has_single_numeric_query_param(url, "id")
+    if section == "laboratori":
+        return has_single_numeric_query_param(url, "id")
+    if section == "premi-ricerca":
+        return has_single_numeric_query_param(url, "anno")
+    return False
+
+
+def is_teacher_resources_url(url: str) -> bool:
+    """True per risorse docente e relativi dettagli."""
+    segments = path_segments(url)
+    if len(segments) != 2 or segments[1] != "risorse":
+        return False
+    if not urlparse(url).query:
+        return True
+    params = query_params(url)
+    if set(params) == {"categoria"}:
+        return len(params["categoria"]) == 1 and params["categoria"][0].isdigit()
+    return (
+        set(params) == {"categoria", "risorsa"}
+        and len(params["categoria"]) == 1
+        and len(params["risorsa"]) == 1
+        and params["categoria"][0].isdigit()
+        and params["risorsa"][0].isdigit()
+    )
+
+
+def is_teacher_home_url(url: str) -> bool:
+    """True per home docente e avvisi personali."""
+    segments = path_segments(url)
+    if len(segments) == 1:
+        return not urlparse(url).query
+    if len(segments) != 2 or segments[1] != "home":
+        return False
+    if not urlparse(url).query:
+        return True
+    params = query_params(url)
+    if set(params) == {"avvisi"}:
+        return params["avvisi"] == ["1"]
+    return has_single_numeric_query_param(url, "avviso")
+
+
+def is_teacher_international_url(url: str) -> bool:
+    """True per sottosezioni internazionali dei profili docente."""
+    segments = path_segments(url)
+    return (
+        len(segments) == 3
+        and segments[1] == "international"
+        and segments[2] in TEACHER_INTERNATIONAL_SECTIONS
+        and not urlparse(url).query
+    )
+
+
+def is_teacher_simple_research_section_url(url: str) -> bool:
+    """True per sottosezioni ricerca docente senza query."""
+    segments = path_segments(url)
+    return (
+        len(segments) == 3
+        and segments[1] == "ricerca"
+        and segments[2] in TEACHER_RESEARCH_SECTIONS
+        and not urlparse(url).query
+    )
+
+
+def is_teacher_supported_content_url(url: str, config: dict) -> bool:
+    """True per le sole pagine docente utili al corpus RAG pre-chunking."""
+    if domain_of(url) != scope_value(config, "teacher_domain", "docenti.unisa.it"):
+        return False
+
+    segments = path_segments(url)
+    if is_teacher_home_url(url):
+        return True
+    if len(segments) == 2 and segments[1] in {"curriculum", "ricerca"}:
+        return not urlparse(url).query
+    if is_teacher_resources_url(url):
+        return True
+    if is_teacher_didactics_url(url):
+        return True
+    if is_teacher_teaching_detail_url(url):
+        return True
+    if is_teacher_lesson_schedule_url(url):
+        return True
+    if is_teacher_publications_landing_url(url):
+        return True
+    if is_teacher_publications_overview_url(url):
+        return True
+    if is_teacher_projects_overview_url(url):
+        return True
+    if is_teacher_projects_filtered_url(url):
+        return True
+    if is_teacher_project_detail_url(url):
+        return True
+    if is_teacher_spin_off_url(url):
+        return True
+    if is_teacher_research_query_url(url):
+        return True
+    if is_teacher_simple_research_section_url(url):
+        return True
+    if is_teacher_international_url(url):
+        return True
+    return False
+
+
 def allowed_teacher_profiles_from_context(context: dict | None) -> set[str]:
     """Whitelist profili docente propagata dalla discovery ai filtri URL."""
     if not context:
@@ -584,6 +1021,8 @@ def is_teacher_link_in_scope(
     target_profile = teacher_profile_key(url, config)
     if not target_profile:
         return False
+    if not is_teacher_supported_content_url(url, config):
+        return False
 
     allowed_profiles = allowed_teacher_profiles_from_context(context)
     if target_profile in allowed_profiles:
@@ -603,8 +1042,12 @@ def is_teacher_link_in_scope(
     
     if domain_of(source_url) != scope_value(config, "teacher_domain", "docenti.unisa.it"):
         return False
-    
-    return False
+
+    # Una volta entrati in un profilo docente autorizzato, restiamo confinati
+    # allo stesso primo segmento del path. Questo copre i profili numerici
+    # esposti da docenti.unisa.it dopo redirect, es. /058553/home -> /058553/curriculum.
+    source_profile = teacher_profile_key(source_url, config)
+    return bool(source_profile and source_profile == target_profile)
 
 
 def is_pdf_in_scope(url: str, config: dict, source_url: str | None) -> bool:
@@ -635,6 +1078,9 @@ def is_in_scope_url(
     }
 
     if is_pdf_url(url):
+        rescue_skip_reason = diem_rescue_upload_scope_reason(url, source_url, config)
+        if rescue_skip_reason:
+            return False, rescue_skip_reason
         if is_pdf_in_scope(url, config, source_url):
             return True, "ok"
         return False, "scope_pdf"
@@ -729,7 +1175,8 @@ def can_index_url(
     if not ok:
         return False, reason
 
-    if has_noisy_query(url):
-        return False, "noisy_query"
+    skip_reason = index_policy_skip_reason(url, config)
+    if skip_reason:
+        return False, skip_reason
 
     return True, "ok"

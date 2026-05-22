@@ -54,6 +54,12 @@ crawler:
   # URL già visitati vengono ricontrollati dopo questa età minima.
   refresh_after_days: 7
 
+  # Backfill esplicito delle sezioni Home | Bandi DIEM. Serve a non dipendere
+  # solo dai link visibili dell'anno corrente: vengono accodati gli archivi
+  # annuali dei moduli DIEM da questo anno fino all'anno corrente.
+  include_diem_bandi_archives: true
+  diem_bandi_archive_start_year: 2013
+
   # Limite massimo (in byte) per il salvataggio dell'HTML.
   # Le pagine più grandi vengono ignorate con status="too_large".
   max_html_bytes: 5000000

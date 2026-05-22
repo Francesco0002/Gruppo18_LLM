@@ -106,6 +106,49 @@ REPORTABLE_PDF_KEYWORDS = (
     "decreto",
 )
 
+DIEM_RESCUE_UPLOAD_PREFIX = "/uploads/rescue/"
+DIEM_STRUCTURE_ID = "300638"
+DIEM_BANDI_STRUCTURED_MODULES = {
+    "139": "struttura",  # Incarichi di Insegnamento
+    "504": "struttura",  # Collaborazioni con il Dipartimento
+    "316": "struttura",  # Personale Tecnico Amministrativo
+    "67": "struttura",  # Assegni di Ricerca
+    "292": "struttura",  # Borse di Ricerca
+    "505": "struttura",  # Altri bandi
+    "293": "cdsstruttura",  # Borse e Premi
+}
+DIEM_BANDI_UNSTRUCTURED_MODULES = {
+    "226",  # Dottorati di Ricerca: il sito non espone struttura/cdsStruttura.
+}
+DIEM_DOCTORATE_CONCORSO_IDS = {
+    "1968",
+    "3193",
+    "4368",
+    "5206",
+    "6527",
+    "6545",
+    "7145",
+    "8245",
+    "8253",
+    "8465",
+    "8469",
+    "8697",
+    "8705",
+    "9251",
+    "9258",
+    "9443",
+    "9450",
+}
+DIEM_BANDI_INDEXABLE_QUERY_PARAMS = {
+    "anno",
+    "bando",
+    "categoria",
+    "idconcorso",
+    "modulo",
+    "struttura",
+    "cdsstruttura",
+}
+
 
 def pdf_source_section_from_url(url: str) -> str:
     """Raggruppa una pagina sorgente in una sezione leggibile del corpus."""
@@ -133,6 +176,67 @@ def normalized_keyword_text(*parts: str) -> str:
     """Normalizza filename e testo link per cercare keyword multi-parola."""
     text = " ".join(part for part in parts if part).lower()
     return re.sub(r"[\s_]+", "-", text)
+
+
+def is_diem_rescue_upload_pdf(pdf_url: str, config: dict | None = None) -> bool:
+    """True per allegati nel bucket rescue esposto dal dominio DIEM.
+
+    Quel path non e' una prova sufficiente di pertinenza DIEM: UNISA lo usa come
+    storage condiviso e molti documenti di altri dipartimenti finiscono sotto
+    `www.diem.unisa.it/uploads/rescue/...`.
+    """
+    parsed = urlparse(pdf_url)
+    diem_domain = "www.diem.unisa.it"
+    if config is not None:
+        diem_domain = str(config.get("scope", {}).get("diem_domain", diem_domain)).lower()
+    return (
+        parsed.netloc.lower() == diem_domain
+        and parsed.path.lower().startswith(DIEM_RESCUE_UPLOAD_PREFIX)
+        and parsed.path.lower().endswith(".pdf")
+    )
+
+
+def diem_rescue_upload_matches_didactic_focus(pdf_url: str, parent_url: str) -> bool:
+    """True quando l'allegato rescue appartiene al focus didattico sorgente."""
+    parent = urlparse(parent_url)
+    pdf = urlparse(pdf_url)
+    focus_id = query_value(parent_url, "id")
+    if not focus_id:
+        return False
+    return (
+        parent.netloc.lower() == "www.diem.unisa.it"
+        and parent.path.rstrip("/").lower() == "/didattica/focus"
+        and pdf.netloc.lower() == "www.diem.unisa.it"
+        and f"/{focus_id}/" in pdf.path
+    )
+
+
+def trusted_diem_rescue_upload_context(pdf_url: str, parent_url: str | None) -> bool:
+    """Autorizza solo rescue upload DIEM con un legame sorgente verificabile."""
+    if not parent_url:
+        return False
+    filename = Path(urlparse(pdf_url).path).name
+    return (
+        diem_rescue_upload_matches_didactic_focus(pdf_url, parent_url)
+        or is_diem_bandi_parent(parent_url)
+        or (
+            "calendario" in normalized_keyword_text(filename)
+            and is_informative_calendar_parent(parent_url)
+        )
+    )
+
+
+def diem_rescue_upload_scope_reason(
+    pdf_url: str,
+    parent_url: str | None = None,
+    config: dict | None = None,
+) -> str | None:
+    """Motivo di esclusione per rescue upload DIEM non verificabili."""
+    if not is_diem_rescue_upload_pdf(pdf_url, config):
+        return None
+    if trusted_diem_rescue_upload_context(pdf_url, parent_url):
+        return None
+    return "diem_rescue_upload_untrusted"
 
 
 def matched_pdf_keywords(pdf_url: str, link_text: str) -> list[str]:
@@ -192,6 +296,72 @@ def is_informative_calendar_parent(parent_url: str) -> bool:
     )
 
 
+def query_values(url: str, name: str) -> list[str]:
+    """Restituisce tutti i valori di una query normalizzando il nome."""
+    return [
+        value.lower()
+        for param_name, value in parse_qsl(urlparse(url).query, keep_blank_values=True)
+        if param_name.lower() == name
+    ]
+
+
+def is_explicit_diem_bandi_url(url: str) -> bool:
+    """True per le sezioni bandi DIEM che devono essere archiviate integralmente."""
+    parsed = urlparse(url)
+    path = parsed.path.lower().rstrip("/")
+    if parsed.netloc.lower() != "www.diem.unisa.it" or path != "/home/bandi":
+        return False
+
+    params = {
+        name.lower()
+        for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    if not params or not params <= DIEM_BANDI_INDEXABLE_QUERY_PARAMS:
+        return False
+
+    module_values = query_values(url, "modulo")
+    if len(module_values) != 1:
+        return False
+
+    module = module_values[0]
+    if module in DIEM_BANDI_UNSTRUCTURED_MODULES:
+        concorso_values = query_values(url, "idconcorso")
+        return len(concorso_values) == 1 and concorso_values[0] in DIEM_DOCTORATE_CONCORSO_IDS
+
+    structure_param = DIEM_BANDI_STRUCTURED_MODULES.get(module)
+    return bool(
+        structure_param
+        and query_values(url, structure_param) == [DIEM_STRUCTURE_ID]
+    )
+
+
+def is_diem_bandi_parent(parent_url: str) -> bool:
+    """True per pagine bandi esplicitamente ancorate allo scope DIEM."""
+    return is_explicit_diem_bandi_url(parent_url)
+
+
+def has_diem_structure_query(url: str) -> bool:
+    """True se la query identifica esplicitamente la struttura DIEM."""
+    return any(
+        name.lower() in {"struttura", "cdsstruttura"}
+        and value == DIEM_STRUCTURE_ID
+        for name, value in parse_qsl(urlparse(url).query, keep_blank_values=True)
+    )
+
+
+def is_diem_international_rescue_pdf(pdf_url: str, parent_url: str) -> bool:
+    """True per export PDF delle liste International filtrate sul DIEM."""
+    pdf = urlparse(pdf_url)
+    parent = urlparse(parent_url)
+    return (
+        pdf.netloc.lower() == "www.diem.unisa.it"
+        and pdf.path.lower().startswith("/unisa-rescue-page/pdf/")
+        and parent.netloc.lower() == "www.diem.unisa.it"
+        and parent.path.lower().rstrip("/").startswith("/international")
+        and has_diem_structure_query(pdf_url)
+    )
+
+
 def query_value(url: str, name: str) -> str | None:
     """Restituisce il primo valore di una query, se presente."""
     for param_name, value in parse_qsl(urlparse(url).query, keep_blank_values=True):
@@ -202,17 +372,7 @@ def query_value(url: str, name: str) -> str | None:
 
 def is_didactic_focus_attachment(pdf_url: str, parent_url: str) -> bool:
     """True per PDF allegati alla stessa pagina /didattica/focus?id=..."""
-    parent = urlparse(parent_url)
-    pdf = urlparse(pdf_url)
-    focus_id = query_value(parent_url, "id")
-    if not focus_id:
-        return False
-    return (
-        parent.netloc.lower() == "www.diem.unisa.it"
-        and parent.path.rstrip("/").lower() == "/didattica/focus"
-        and pdf.netloc.lower() == "www.diem.unisa.it"
-        and f"/{focus_id}/" in pdf.path
-    )
+    return diem_rescue_upload_matches_didactic_focus(pdf_url, parent_url)
 
 
 def pdf_download_exception(
@@ -229,6 +389,8 @@ def pdf_download_exception(
         for domain in config["crawler"].get("pdf_allowed_domains", [])
     }
     keywords = matched_pdf_keywords(pdf_url, link_text)
+    if diem_rescue_upload_scope_reason(pdf_url, parent_url, config):
+        return False, section, keywords, None
     # Le condizioni restano separate e leggibili di proposito: ogni ramo
     # rappresenta una famiglia documentale ammessa per una ragione diversa e
     # produce un motivo esplicito usato poi nei report di copertura.
@@ -254,7 +416,10 @@ def pdf_download_exception(
     international_program_document = (
         pdf_domain in allowed_pdf_domains
         and section == "international"
-        and has_policy_keyword(keywords, INTERNATIONAL_PROGRAM_PDF_KEYWORDS)
+        and (
+            has_policy_keyword(keywords, INTERNATIONAL_PROGRAM_PDF_KEYWORDS)
+            or is_diem_international_rescue_pdf(pdf_url, parent_url)
+        )
     )
     course_evidence_document = (
         pdf_domain in allowed_pdf_domains
@@ -266,6 +431,11 @@ def pdf_download_exception(
         pdf_domain in allowed_pdf_domains
         and section == "home_bandi"
         and is_main_opportunity_pdf(pdf_url, link_text)
+    )
+    explicit_bandi_document = (
+        pdf_domain in allowed_pdf_domains
+        and section == "home_bandi"
+        and is_explicit_diem_bandi_url(parent_url)
     )
     central_decree = (
         pdf_domain in allowed_pdf_domains
@@ -286,6 +456,8 @@ def pdf_download_exception(
         return True, section, keywords, "allowed_course_evidence_document"
     if opportunity_document:
         return True, section, keywords, "allowed_opportunity_document"
+    if explicit_bandi_document:
+        return True, section, keywords, "allowed_bandi_document"
     if central_decree:
         return True, section, keywords, "allowed_central_decree"
     return False, section, keywords, None

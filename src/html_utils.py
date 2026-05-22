@@ -13,11 +13,17 @@ La decisione se un URL sia nello scope resta in url_filters.py.
 from __future__ import annotations
 
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from url_filters import can_traverse_url, decoded_rescue_path_segments, normalize_url
+from url_filters import (
+    can_traverse_url,
+    decoded_rescue_path_segments,
+    directory_person_matricola,
+    config_list,
+    normalize_url,
+)
 
 
 def resolve_href(base_url: str, href: str) -> str:
@@ -71,6 +77,40 @@ def is_course_numeric_alias_segment(segment: str) -> bool:
     return bool(re.fullmatch(r"\d{16}", segment))
 
 
+def canonical_teacher_profile_url(
+    url: str,
+    base_url: str,
+    config: dict,
+    authorized_directory_bridge: bool,
+) -> str:
+    """Converte il link rubrica -> docenti nello URL numerico del profilo.
+
+    Le pagine rubrica dei docenti DIEM espongono spesso link come
+    `docenti.unisa.it/nome.cognome`, che sul sito attuale possono rispondere
+    con la lista globale dei docenti. Dalla rubrica conosciamo invece la
+    matricola, quindi usiamo direttamente `docenti.unisa.it/<matricola>/home`.
+    """
+    if not authorized_directory_bridge:
+        return url
+
+    matricola = directory_person_matricola(base_url, config)
+    if not matricola:
+        return url
+
+    parsed = urlparse(url)
+    teacher_domain = str(
+        config.get("scope", {}).get("teacher_domain", "docenti.unisa.it")
+    ).lower()
+    if parsed.netloc.lower() != teacher_domain:
+        return url
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) != 1 or segments[0].isdigit():
+        return url
+
+    return normalize_url(f"https://{teacher_domain}/{matricola}/home")
+
+
 def extract_canonical_from_soup(soup: BeautifulSoup, fallback_url: str) -> str:
     """Estrae il canonical riusando una soup già parsata."""
     tag = soup.find("link", rel="canonical")
@@ -103,16 +143,67 @@ def extract_link_entries_from_soup(
         if urlparse(absolute_url).scheme not in {"http", "https"}:
             continue
 
-        url = normalize_url(absolute_url)
+        url = canonical_teacher_profile_url(
+            normalize_url(absolute_url),
+            base_url,
+            config,
+            authorized_directory_bridge,
+        )
+        label_parts = [tag.get_text(" ", strip=True), str(tag.get("title", "")).strip()]
+        label = " ".join(part for part in label_parts if part)
+        if not is_allowed_diem_doctorate_bandi_detail(url, label, config):
+            continue
+
         ok, _ = can_traverse_url(url, config, context)
         if ok:
-            label_parts = [tag.get_text(" ", strip=True), str(tag.get("title", "")).strip()]
             links[url] = {
                 "url": url,
-                "text": " ".join(part for part in label_parts if part),
+                "text": label,
             }
 
     return list(links.values())
+
+
+def configured_doctorate_codes(config: dict) -> set[str]:
+    """Codici dei dottorati DIEM configurati nello scope dei corsi."""
+    return {
+        str(path).lower()
+        for path in config_list(config, "scope", "allowed_course_paths")
+        if str(path).lower().startswith("dot")
+    }
+
+
+def is_diem_doctorate_bandi_detail_url(url: str) -> bool:
+    """True per dettagli dei concorsi di dottorato esposti da /home/bandi."""
+    parsed = urlparse(url)
+    if parsed.netloc.lower() != "www.diem.unisa.it":
+        return False
+    if parsed.path.rstrip("/").lower() != "/home/bandi":
+        return False
+
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    return (
+        params.get("modulo") == ["226"]
+        and "bando" in params
+        and "idConcorso" in params
+    )
+
+
+def is_allowed_diem_doctorate_bandi_detail(
+    url: str,
+    link_text: str,
+    config: dict,
+) -> bool:
+    """Filtra i dettagli dottorato tenendo solo i corsi DIEM configurati."""
+    if not is_diem_doctorate_bandi_detail_url(url):
+        return True
+
+    allowed_codes = configured_doctorate_codes(config)
+    if not allowed_codes:
+        return False
+
+    text = link_text.lower()
+    return any(code in text for code in allowed_codes)
 
 
 def extract_links_from_soup(
