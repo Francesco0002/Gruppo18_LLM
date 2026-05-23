@@ -1,0 +1,7 @@
+{"id": "office_006", "category": "office", "question": "Mi dici gli orari di ricevimento dei docenti?", "expected_source_groups": [], "expected_behavior": "ask_clarification", "eval_split": "retrieval"}
+{"id": "office_007", "category": "office", "question": "Orario di ricevimento docente DIEM", "expected_source_groups": [], "expected_behavior": "ask_clarification", "eval_split": "retrieval"}
+{"id": "out_001", "category": "out_of_scope", "question": "Quali corsi offre il Dipartimento di Medicina di Napoli?", "expected_source_groups": [], "expected_behavior": "out_of_scope", "eval_split": "retrieval"}
+{"id": "out_002", "category": "out_of_scope", "question": "Com'è il meteo a Salerno oggi?", "expected_source_groups": [], "expected_behavior": "out_of_scope", "eval_split": "retrieval"}
+{"id": "out_003", "category": "out_of_scope", "question": "Chi è il presidente degli Stati Uniti?", "expected_source_groups": [], "expected_behavior": "out_of_scope", "eval_split": "retrieval"}
+{"id": "out_004", "category": "out_of_scope", "question": "Quali sono i corsi del Dipartimento di Giurisprudenza?", "expected_source_groups": [], "expected_behavior": "out_of_scope", "eval_split": "retrieval"}
+{"id": "out_005", "category": "out_of_scope", "question": "Scrivimi una poesia sul mare", "expected_source_groups": [], "expected_behavior": "out_of_scope", "eval_split": "retrieval"}
