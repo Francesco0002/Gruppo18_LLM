@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -36,6 +36,19 @@ GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
     "on",
 }
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "3"))
+
+MISSING_TITLE_PLACEHOLDERS = {
+    "",
+    "n/d",
+    "n.a.",
+    "n/a",
+    "nd",
+    "none",
+    "null",
+    "titolo non disponibile",
+    "titolo non presente",
+    "senza titolo",
+}
 
 
 ConversationTurn = dict[str, str]
@@ -77,10 +90,49 @@ def metadata_to_string(value: Any) -> str:
     return str(value)
 
 
+def title_from_url(url: str) -> str:
+    """
+    Crea un'etichetta leggibile quando la fonte non ha un titolo indicizzato.
+    Utile soprattutto per PDF, che spesso non espongono metadata title.
+    """
+    if not url or url == "URL non disponibile":
+        return ""
+
+    path = urlsplit(url).path
+    slug = unquote(path.rstrip("/").split("/")[-1]).strip()
+    if not slug:
+        return ""
+
+    slug = re.sub(r"\.(pdf|html?|aspx?)$", "", slug, flags=re.IGNORECASE)
+    words = [word for word in re.split(r"[-_\s]+", slug) if word]
+    if not words:
+        return ""
+
+    keep_uppercase = {"diem", "ofa", "tolc", "tolc-i", "pdf"}
+    formatted_words = [
+        word.upper() if word.lower() in keep_uppercase else word.capitalize()
+        for word in words
+    ]
+    return " ".join(formatted_words)
+
+
+def display_title_from_metadata(metadata: dict[str, Any], url: str) -> str:
+    title = metadata_to_string(metadata.get("title")).strip()
+    if title.lower() not in MISSING_TITLE_PLACEHOLDERS:
+        return title
+
+    breadcrumb = (
+        metadata_to_string(metadata.get("breadcrumb"))
+        or metadata_to_string(metadata.get("breadcrumb_text"))
+    ).strip()
+    if breadcrumb:
+        return breadcrumb.split(" > ")[-1].strip() or breadcrumb
+
+    return title_from_url(url) or "Fonte senza titolo"
+
+
 def get_source_from_result(result: RetrievalResult) -> Source:
     metadata = result.metadata or {}
-
-    title = metadata_to_string(metadata.get("title")) or "Titolo non disponibile"
 
     url = (
         metadata_to_string(metadata.get("source_url"))
@@ -88,6 +140,8 @@ def get_source_from_result(result: RetrievalResult) -> Source:
         or metadata_to_string(metadata.get("url"))
         or "URL non disponibile"
     )
+
+    title = display_title_from_metadata(metadata, url)
 
     breadcrumb = (
         metadata_to_string(metadata.get("breadcrumb"))

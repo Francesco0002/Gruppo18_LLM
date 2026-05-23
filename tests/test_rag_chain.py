@@ -192,6 +192,67 @@ FONTI_USATE: [2, 3]
             "https://www.diem.unisa.it/dipartimento/strutture",
         )
 
+    def test_build_sources_uses_filename_when_title_is_missing(self) -> None:
+        results = [
+            RetrievalResult(
+                chunk_id="chunk_pdf",
+                text="PDF",
+                metadata={
+                    "title": None,
+                    "source_url": "https://corsi.unisa.it/uploads/rescue/499/1391/volantino-2026-tolc-diem-ofa.pdf",
+                    "chunk_id": "chunk_pdf",
+                },
+                source="test",
+                rank=1,
+                score=1.0,
+            )
+        ]
+
+        sources = build_sources(results)
+
+        self.assertEqual(sources[0].title, "Volantino 2026 TOLC DIEM OFA")
+
+    def test_build_sources_ignores_placeholder_title(self) -> None:
+        results = [
+            RetrievalResult(
+                chunk_id="chunk_pdf",
+                text="PDF",
+                metadata={
+                    "title": "N/D",
+                    "source_url": "https://corsi.unisa.it/uploads/rescue/499/1391/info-ofa-diem-25-26.pdf",
+                    "chunk_id": "chunk_pdf",
+                },
+                source="test",
+                rank=1,
+                score=1.0,
+            )
+        ]
+
+        sources = build_sources(results)
+
+        self.assertEqual(sources[0].title, "Info OFA DIEM 25 26")
+
+    def test_build_sources_uses_breadcrumb_when_title_is_missing(self) -> None:
+        results = [
+            RetrievalResult(
+                chunk_id="chunk_breadcrumb",
+                text="Pagina",
+                metadata={
+                    "title": "",
+                    "source_url": "https://www.diem.unisa.it/didattica/bandi",
+                    "breadcrumb": ["DIEM", "Didattica", "Bandi"],
+                    "chunk_id": "chunk_breadcrumb",
+                },
+                source="test",
+                rank=1,
+                score=1.0,
+            )
+        ]
+
+        sources = build_sources(results)
+
+        self.assertEqual(sources[0].title, "Bandi")
+
     def test_answer_question_as_text_accepts_conversation_history(self) -> None:
         history = [{"role": "user", "content": "Quali laboratori ci sono?"}]
 
