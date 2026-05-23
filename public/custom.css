@@ -1,0 +1,73 @@
+#message-composer {
+  min-height: 56px !important;
+  padding: 8px 10px 8px 18px !important;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 12px !important;
+  border: 1px solid hsl(var(--border) / 0.7) !important;
+  border-radius: 22px !important;
+  background: hsl(var(--card) / 0.96) !important;
+  box-shadow:
+    0 16px 40px rgb(0 0 0 / 0.18),
+    inset 0 1px 0 rgb(255 255 255 / 0.04) !important;
+}
+
+#message-composer > .relative {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+}
+
+#message-composer > .flex.items-center.justify-between {
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+}
+
+#message-composer > .flex.items-center.justify-between > .flex.items-center[class*="-ml-1.5"] {
+  display: none !important;
+}
+
+#chat-input {
+  min-height: 40px !important;
+  height: 40px !important;
+  max-height: 128px !important;
+  padding: 9px 0 !important;
+  line-height: 22px !important;
+  overflow-y: auto !important;
+  scrollbar-width: none !important;
+  caret-color: hsl(var(--primary)) !important;
+}
+
+#chat-input::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+}
+
+#chat-input::placeholder {
+  color: hsl(var(--muted-foreground) / 0.72) !important;
+}
+
+#chat-submit {
+  width: 38px !important;
+  height: 38px !important;
+  border-radius: 999px !important;
+  box-shadow: 0 8px 18px hsl(var(--primary) / 0.22) !important;
+}
+
+#chat-submit:disabled {
+  opacity: 0.58 !important;
+  box-shadow: none !important;
+}
+
+@media (max-width: 640px) {
+  #message-composer {
+    min-height: 54px !important;
+    padding: 7px 9px 7px 16px !important;
+    border-radius: 20px !important;
+  }
+
+  #chat-submit {
+    width: 36px !important;
+    height: 36px !important;
+  }
+}
