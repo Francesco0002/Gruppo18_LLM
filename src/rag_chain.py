@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from groq import Groq
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from chunk_metadata import flatten_chunk_metadata
 from pipeline_io import BASE_DIR
 
 
@@ -36,6 +37,7 @@ GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
     "on",
 }
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "3"))
+CONTEXTUALIZER_MAX_HISTORY_MESSAGES = int(os.getenv("RAG_CONTEXTUALIZER_MAX_HISTORY_MESSAGES", "6"))
 
 MISSING_TITLE_PLACEHOLDERS = {
     "",
@@ -224,6 +226,13 @@ def truncate_text(text: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "..."
 
 
+def truthy_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_context(
     results: list[RetrievalResult],
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
@@ -276,7 +285,10 @@ LAB_ALIAS_PATTERNS = (
 )
 
 
-FOLLOW_UP_PATTERNS = [
+CONTEXT_REFERENCE_PATTERNS = [
+    r"\blui\b",
+    r"\blei\b",
+    r"\bloro\b",
     r"\bsuo\b",
     r"\bsua\b",
     r"\bsuoi\b",
@@ -284,36 +296,39 @@ FOLLOW_UP_PATTERNS = [
     r"\bquest[oaie]\b",
     r"\bquel(?:lo|la|li|le)?\b",
     r"\btale\b",
-    r"\blaboratorio\b",
-    r"\bstruttura\b",
-    r"\bche strumenti possiede\b",
-    r"\bquali strumenti\b",
-    r"\bquando scade\b",
-    r"\bqual[ie] sono\b",
-    r"\bcome funziona\b",
-    r"\bchi (?:è|e|sono)\b",
-    r"\bdove si trova\b",
-    r"\bdi cosa si occupa\b",
-    r"\bquanto dura\b",
-    r"\bcome si accede\b",
-    r"\bcome posso candidarmi\b",
-    r"\bquali requisiti\b",
+    r"\bne\b",
 ]
 
+ELLIPTIC_FOLLOW_UP_PATTERNS = [
+    r"^(?:e|invece|anche)\b",
+    r"\bquanto dura\b",
+    r"\bquanto costa\b",
+    r"\bquando scade\b",
+    r"\bqual[ei]\s+(?:è|e|sono)\s+la\s+scadenza\b",
+    r"\bcome funziona\b",
+    r"\bcome si fa\b",
+    r"\bcome si accede\b",
+    r"\bcome partecipare\b",
+    r"\bcome posso partecipare\b",
+    r"\bcome posso candidarmi\b",
+    r"\ba chi (?:rivolgersi|mi posso rivolgere)\b",
+    r"\bdi cosa si occupa\b",
+    r"\bche requisiti\b",
+    r"\bquali requisiti\b",
+    r"\bqual[ei]\s+(?:è|e|sono)\s+i\s+requisiti\b",
+    r"\bci sono requisiti\b",
+    r"\bchi (?:è|e|sono)\b",
+    r"\bdove (?:si trova|trovo)\b",
+    r"\bche strumenti possiede\b",
+    r"\bquali strumenti\b",
+    r"\bprossim[oa]\s+semestre\b",
+]
 
-SUBJECT_PATTERNS = (
-    (re.compile(r"\borari?\s+di\s+ricevimento\b|\bricevimento\b", re.IGNORECASE), "orari di ricevimento dei docenti DIEM"),
-    (re.compile(r"\b(?:erasmus|mobilità|mobilita|accordi\s+erasmus|traineeship|learning\s+agreement)\b", re.IGNORECASE), "Erasmus e mobilità internazionale del DIEM"),
-    (re.compile(r"\b(?:dottorato|dottorati|phd|doctoral)\b", re.IGNORECASE), "dottorati collegati al DIEM"),
-    (re.compile(r"\b(?:progetti?\s+finanziati?|progetti?\s+di\s+ricerca|ricerca|intelligenza\s+artificiale|ia\s+generativa)\b", re.IGNORECASE), "progetti di ricerca e progetti finanziati del DIEM"),
-    (re.compile(r"\b(?:bandi?|avvisi?|graduatorie?|selezion[ei]|concorso|concorsi)\b", re.IGNORECASE), "bandi e avvisi del DIEM"),
-    (re.compile(r"\b(?:corsi?\s+di\s+laurea|laure[ae]|laurea\s+magistrale|offerta\s+formativa|insegnamenti?|didattica)\b", re.IGNORECASE), "offerta formativa e corsi di laurea del DIEM"),
-    (re.compile(r"\b(?:docenti|professori|professore|professoressa|personale|rubrica)\b", re.IGNORECASE), "docenti e personale del DIEM"),
-    (re.compile(r"\b(?:laboratori|laboratorio|strutture|aule|centri)\b", re.IGNORECASE), "laboratori e strutture del DIEM"),
-    (re.compile(r"\b(?:contatti?|sede|indirizzo|ubicazione|dove\s+si\s+trova)\b", re.IGNORECASE), "sede e contatti del DIEM"),
-    (re.compile(r"\b(?:immatricolazioni?|iscrizion[ei]|accesso|requisiti|tolc|ofa|ammissione)\b", re.IGNORECASE), "requisiti di accesso e immatricolazioni dei corsi DIEM"),
-    (re.compile(r"\b(?:servizi?|orientamento|tutorato|segreteria)\b", re.IGNORECASE), "servizi e orientamento del DIEM"),
-)
+EXPLICIT_ANCHOR_PATTERNS = [
+    r"\b(?:requisiti|criteri|scadenza|durata|costo|calendario|sede|studio|ufficio|strumenti|strumentazione)\s+(?:di|del|della|dei|degli|delle|per|a|al|alla|su|sul|sulla)\s+\w+",
+    r"\b(?:come funziona|come si accede|dove si trova|dove trovo|chi sono|chi è)\s+(?:il|lo|la|i|gli|le|l'|un|una)?\s*\w+",
+    r"\b(?:programma|progetto|bando|corso|docente|professore|professoressa|laboratorio|servizio|seduta|prova|esame)\s+(?:di|del|della|dei|degli|delle|per|a|al|alla|su|sul|sulla)?\s*\w+",
+]
 
 
 def normalize_conversation_history(
@@ -352,36 +367,219 @@ def expand_known_aliases(question: str) -> str:
     return question
 
 
-def is_context_dependent_question(question: str) -> bool:
+def has_context_reference(question: str) -> bool:
     question_lower = question.lower()
-    tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9_]+", question_lower)
+    return any(re.search(pattern, question_lower) for pattern in CONTEXT_REFERENCE_PATTERNS)
 
-    if len(tokens) <= 6:
+
+def has_explicit_anchor(question: str) -> bool:
+    question_lower = question.lower()
+    return any(re.search(pattern, question_lower) for pattern in EXPLICIT_ANCHOR_PATTERNS)
+
+
+def has_elliptic_followup_shape(question: str) -> bool:
+    question_lower = question.lower()
+    return any(re.search(pattern, question_lower) for pattern in ELLIPTIC_FOLLOW_UP_PATTERNS)
+
+
+def is_context_dependent_question(question: str) -> bool:
+    if has_context_reference(question):
         return True
 
-    return any(re.search(pattern, question_lower) for pattern in FOLLOW_UP_PATTERNS)
+    if not has_elliptic_followup_shape(question):
+        return False
+
+    return not has_explicit_anchor(question)
 
 
-def extract_recent_subject(conversation_history: list[ConversationTurn] | None) -> str:
+def latest_substantive_user_turn(
+    conversation_history: list[ConversationTurn] | None,
+) -> str:
     for turn in reversed(normalize_conversation_history(conversation_history)):
-        content = turn["content"]
-
-        for pattern, subject in LAB_ALIAS_PATTERNS:
-            if pattern.search(content):
-                return subject
-
-        teacher_match = re.search(
-            r"\b(?:prof\.?|professore|professoressa|docente)\s+([A-ZÀ-Ý][a-zà-ÿ]+(?:\s+[A-ZÀ-Ý][a-zà-ÿ]+){1,2})",
-            content,
-        )
-        if teacher_match:
-            return f"docente {teacher_match.group(1)} del DIEM"
-
-        for pattern, subject in SUBJECT_PATTERNS:
-            if pattern.search(content):
-                return subject
+        if turn["role"] == "user" and not is_low_signal_turn(turn["content"]):
+            return turn["content"]
 
     return ""
+
+
+def is_low_signal_turn(content: str) -> bool:
+    normalized = content.strip().lower()
+    return normalized in {
+        "ciao",
+        "salve",
+        "buongiorno",
+        "buonasera",
+        "ok",
+        "okay",
+        "grazie",
+        "perfetto",
+        "va bene",
+        "chiaro",
+    }
+
+
+def contextualizer_enabled() -> bool:
+    return truthy_env("RAG_CONTEXTUALIZER_ENABLED", default=True)
+
+
+def format_contextualizer_history(
+    conversation_history: list[ConversationTurn] | None,
+) -> str:
+    history = normalize_conversation_history(
+        conversation_history,
+        max_messages=CONTEXTUALIZER_MAX_HISTORY_MESSAGES,
+    )
+    lines: list[str] = []
+
+    for turn in history:
+        label = "Utente" if turn["role"] == "user" else "Assistente"
+        lines.append(f"{label}: {truncate_text(turn['content'], 500)}")
+
+    return "\n".join(lines)
+
+
+def build_contextualizer_prompt(
+    question: str,
+    conversation_history: list[ConversationTurn] | None,
+) -> str:
+    history_text = format_contextualizer_history(conversation_history)
+
+    return f"""
+Sei un modulo di contestualizzazione per un sistema RAG.
+
+Devi decidere se la DOMANDA CORRENTE dipende davvero dalla CRONOLOGIA per essere
+capita dal retriever. Non devi rispondere alla domanda.
+
+Regole:
+- Se la domanda corrente introduce un soggetto, corso, docente, servizio, documento
+  o tema esplicito nuovo, non usare la cronologia: restituisci la domanda invariata.
+- Se la domanda corrente è già comprensibile e ricercabile da sola, restituiscila
+  invariata.
+- Usa la cronologia solo per risolvere pronomi, deittici o ellissi, ad esempio
+  "lui", "lei", "suo", "questo", "quello", "come funziona?", "quando scade?",
+  "quali sono i requisiti?", "dove si trova?".
+- Preferisci sempre l'ultimo scambio utente/assistente. Non recuperare soggetti
+  vecchi se nel frattempo l'utente ha cambiato argomento.
+- Se non c'è un antecedente chiaro e recente, non inventarlo: restituisci la
+  domanda invariata.
+- La domanda autonoma deve restare in italiano e deve contenere solo le parole
+  necessarie per il retrieval, non una risposta.
+
+Restituisci solo JSON valido:
+{{
+  "needs_context": true,
+  "standalone_question": "domanda autonoma per il retrieval",
+  "reason": "breve motivo"
+}}
+
+CRONOLOGIA:
+{history_text or "Nessuna cronologia utile."}
+
+DOMANDA CORRENTE:
+{question}
+""".strip()
+
+
+def sanitize_contextualized_question(
+    original_question: str,
+    candidate: str,
+) -> str:
+    candidate = " ".join(candidate.split()).strip()
+    if not candidate:
+        return original_question
+
+    if len(candidate) > max(400, len(original_question) * 4):
+        return original_question
+
+    return candidate
+
+
+def parse_contextualizer_payload(
+    raw_response: str,
+    original_question: str,
+) -> str:
+    try:
+        payload = json.loads(strip_model_thinking(raw_response))
+    except json.JSONDecodeError:
+        return original_question
+
+    if not isinstance(payload, dict):
+        return original_question
+
+    needs_context = payload.get("needs_context")
+    standalone_question = str(payload.get("standalone_question") or "").strip()
+
+    if needs_context is not True:
+        return original_question
+
+    return sanitize_contextualized_question(original_question, standalone_question)
+
+
+def call_contextualizer_groq(prompt: str) -> str:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY non trovata.")
+
+    client = Groq(api_key=api_key)
+    request_kwargs: dict[str, Any] = {
+        "model": os.getenv("RAG_CONTEXTUALIZER_MODEL", DEFAULT_GROQ_MODEL),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "top_p": 0.1,
+        "stream": False,
+        "timeout": GROQ_TIMEOUT_SECONDS,
+        "response_format": {"type": "json_object"},
+    }
+
+    try:
+        completion = create_groq_completion(client, request_kwargs)
+    except Exception:
+        request_kwargs.pop("response_format", None)
+        completion = create_groq_completion(client, request_kwargs)
+
+    answer = completion.choices[0].message.content
+    if not answer:
+        raise RuntimeError("Il contextualizer ha restituito una risposta vuota.")
+
+    return answer
+
+
+def contextualize_question_with_llm(
+    question: str,
+    conversation_history: list[ConversationTurn] | None,
+) -> str:
+    if not contextualizer_enabled() or not normalize_conversation_history(conversation_history):
+        return question
+
+    prompt = build_contextualizer_prompt(
+        question=question,
+        conversation_history=conversation_history,
+    )
+    raw_response = call_contextualizer_groq(prompt)
+    return parse_contextualizer_payload(raw_response, question)
+
+
+def deterministic_contextualize_question(
+    question: str,
+    conversation_history: list[ConversationTurn] | None,
+) -> str:
+    """
+    Fallback deterministico quando il contextualizer LLM non è disponibile.
+
+    Non prova a classificare il topic: usa solo segnali linguistici generici
+    di anafora/ellissi e l'ultimo turno utente sostanziale.
+    """
+    if not is_context_dependent_question(question):
+        return question
+
+    recent_user_turn = latest_substantive_user_turn(conversation_history)
+    if not recent_user_turn:
+        return question
+
+    return (
+        f"{question} "
+        f"Contesto della domanda precedente: {truncate_text(recent_user_turn, 180)}"
+    )
 
 
 def build_retrieval_question(
@@ -390,24 +588,34 @@ def build_retrieval_question(
 ) -> str:
     """
     Rende più autonome le domande di follow-up prima del retrieval.
-    La riscrittura è deterministica e prudente: se non trova un soggetto
-    recente affidabile, lascia la domanda invariata.
+
+    Il percorso principale è un contextualizer LLM topic-agnostic, come nei
+    history-aware retriever: se la domanda è autonoma resta invariata, se è
+    ellittica viene riscritta in domanda standalone. Le euristiche sotto sono
+    solo fallback per mantenere il chatbot utilizzabile quando il rewriter non
+    è disponibile.
     """
     question = question.strip()
-    alias_expanded_question = expand_known_aliases(question)
+    has_history = bool(normalize_conversation_history(conversation_history))
 
+    try:
+        if contextualizer_enabled() and has_history:
+            contextualized_question = contextualize_question_with_llm(
+                question=question,
+                conversation_history=conversation_history,
+            )
+            return expand_known_aliases(contextualized_question)
+    except Exception:
+        pass
+
+    alias_expanded_question = expand_known_aliases(question)
     if alias_expanded_question != question:
         return alias_expanded_question
 
-    if not is_context_dependent_question(question):
-        return question
-
-    subject = extract_recent_subject(conversation_history)
-
-    if not subject:
-        return question
-
-    return f"{question} {subject}"
+    return deterministic_contextualize_question(
+        question=question,
+        conversation_history=conversation_history,
+    )
 
 
 def build_conversation_context(
@@ -693,6 +901,19 @@ GENERIC_TEACHER_WORDS = {
     "docenti",
     "ricevimento",
     "ricevimenti",
+    "pubblicazione",
+    "pubblicazioni",
+    "articolo",
+    "articoli",
+    "paper",
+    "lavori",
+    "scientifici",
+    "recente",
+    "recenti",
+    "ultima",
+    "ultime",
+    "ultimo",
+    "ultimi",
     "orario",
     "orari",
     "ore",
@@ -784,10 +1005,12 @@ def load_rag_chunks() -> tuple[dict[str, Any], ...]:
 
 
 def result_from_chunk(chunk: dict[str, Any], rank: int, score: float) -> RetrievalResult:
+    metadata = flatten_chunk_metadata(chunk)
+
     return RetrievalResult(
         chunk_id=str(chunk.get("chunk_id") or chunk.get("text_hash") or f"chunk_{rank}"),
         text=str(chunk.get("text") or ""),
-        metadata=dict(chunk),
+        metadata=metadata,
         source="teacher_lookup",
         rank=rank,
         score=score,
@@ -799,9 +1022,22 @@ def teacher_tokens_from_question(question: str) -> set[str]:
 
 
 def metadata_tokens_for_chunk(chunk: dict[str, Any]) -> set[str]:
+    metadata = flatten_chunk_metadata(chunk)
     metadata_text = " ".join(
-        str(chunk.get(key) or "")
-        for key in ["title", "breadcrumb", "breadcrumb_text", "source_url", "document_url"]
+        str(metadata.get(key) or "")
+        for key in [
+            "title",
+            "breadcrumb",
+            "breadcrumb_text",
+            "source_url",
+            "document_url",
+            "content_title",
+            "section_heading",
+            "entity_name",
+            "teacher_id",
+            "publication_title",
+            "publication_authors",
+        ]
     )
     return simple_tokenize(metadata_text)
 
@@ -814,7 +1050,8 @@ def find_teacher_profile_office_hours(question: str) -> list[RetrievalResult]:
     matches: list[RetrievalResult] = []
 
     for chunk in load_rag_chunks():
-        url = str(chunk.get("source_url") or chunk.get("document_url") or "")
+        metadata = flatten_chunk_metadata(chunk)
+        url = str(metadata.get("source_url") or metadata.get("document_url") or "")
         if "docenti.unisa.it" not in url:
             continue
 
@@ -849,7 +1086,8 @@ def find_teacher_personnel_listing(question: str) -> RetrievalResult | None:
         return None
 
     for chunk in load_rag_chunks():
-        title = str(chunk.get("title") or "")
+        metadata = flatten_chunk_metadata(chunk)
+        title = str(metadata.get("title") or "")
         if title != "Dipartimento | Docenti e Personale":
             continue
 
@@ -866,6 +1104,158 @@ def retrieve_teacher_office_hours(question: str) -> tuple[list[RetrievalResult],
         return profile_results, None
 
     return [], find_teacher_personnel_listing(question)
+
+
+def is_teacher_publications_query(question: str) -> bool:
+    question_lower = question.lower()
+    asks_publications = any(
+        keyword in question_lower
+        for keyword in [
+            "pubblicazione",
+            "pubblicazioni",
+            "articolo",
+            "articoli",
+            "paper",
+            "lavori scientifici",
+        ]
+    )
+
+    return asks_publications and bool(teacher_tokens_from_question(question_lower))
+
+
+def publication_year(result: RetrievalResult) -> int:
+    value = result.metadata.get("publication_year") or result.metadata.get("year") or 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def publication_order(result: RetrievalResult) -> int:
+    value = result.metadata.get("publication_order") or 999_999
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 999_999
+
+
+def find_teacher_publication_summaries(question: str, limit: int = 7) -> list[RetrievalResult]:
+    teacher_tokens = teacher_tokens_from_question(question)
+    if not teacher_tokens:
+        return []
+
+    matches: list[RetrievalResult] = []
+    seen_publication_ids: set[str] = set()
+
+    for chunk in load_rag_chunks():
+        metadata = flatten_chunk_metadata(chunk)
+        if metadata.get("chunk_kind") != "publication_summary":
+            continue
+
+        url = str(metadata.get("source_url") or metadata.get("document_url") or "")
+        if "docenti.unisa.it" not in url or "/ricerca/pubblicazioni" not in url:
+            continue
+
+        combined_tokens = metadata_tokens_for_chunk(chunk).union(
+            simple_tokenize(str(chunk.get("text") or ""))
+        )
+
+        if not teacher_metadata_matches(teacher_tokens, combined_tokens):
+            continue
+
+        publication_id = str(metadata.get("publication_id") or chunk.get("chunk_id") or "")
+        if publication_id and publication_id in seen_publication_ids:
+            continue
+        if publication_id:
+            seen_publication_ids.add(publication_id)
+
+        result = result_from_chunk(
+            chunk,
+            rank=len(matches) + 1,
+            score=float(publication_year_from_metadata(metadata)) + (1 / publication_order_from_metadata(metadata)),
+        )
+        matches.append(result)
+
+    matches.sort(
+        key=lambda result: (
+            publication_year(result),
+            -publication_order(result),
+        ),
+        reverse=True,
+    )
+
+    for rank, result in enumerate(matches, start=1):
+        result.rank = rank
+
+    return matches[:limit]
+
+
+def publication_year_from_metadata(metadata: dict[str, Any]) -> int:
+    value = metadata.get("publication_year") or metadata.get("year") or 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def publication_order_from_metadata(metadata: dict[str, Any]) -> int:
+    value = metadata.get("publication_order") or 999_999
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 999_999
+
+
+def build_direct_publications_answer(
+    question: str,
+    results: list[RetrievalResult],
+) -> str | None:
+    if not is_teacher_publications_query(question) or not results:
+        return None
+
+    first_metadata = results[0].metadata or {}
+    first_source = get_source_from_result(results[0])
+    teacher_name = (
+        metadata_to_string(first_metadata.get("entity_name")).strip()
+        or first_source.title.split("|", 1)[0].strip()
+        or "il docente indicato"
+    )
+
+    lines = [f"Le pubblicazioni più recenti di {teacher_name} che ho trovato sono:"]
+    seen_publication_ids: set[str] = set()
+
+    for result in results:
+        metadata = result.metadata or {}
+        publication_id = metadata_to_string(metadata.get("publication_id")) or result.chunk_id
+        if publication_id in seen_publication_ids:
+            continue
+        seen_publication_ids.add(publication_id)
+
+        title = metadata_to_string(metadata.get("publication_title")).strip()
+        if not title:
+            title_match = re.search(r"Titolo pubblicazione:\s*(.+)", result.text)
+            title = title_match.group(1).strip() if title_match else "Titolo non disponibile"
+
+        year = metadata_to_string(metadata.get("publication_year")).strip()
+        publication_type = metadata_to_string(metadata.get("publication_type")).strip()
+        venue = metadata_to_string(metadata.get("publication_venue")).strip()
+        doi = metadata_to_string(metadata.get("publication_doi")).strip()
+
+        if venue and title and venue.lower().startswith(title.lower()):
+            venue = venue[len(title):].strip(" .")
+
+        details = [value for value in [publication_type, venue] if value]
+        if doi:
+            details.append(f"DOI: {doi}")
+
+        year_prefix = f"{year}: " if year else ""
+        details_suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"- {year_prefix}{title}{details_suffix} [1]")
+
+    if len(lines) == 1:
+        return None
+
+    return "\n".join(lines)
 
 
 def is_office_hours_query(question: str) -> bool:
@@ -1243,6 +1633,24 @@ def answer_question(
             retrieved_chunks=[],
         )
 
+    if is_teacher_publications_query(retrieval_question):
+        publication_chunks = find_teacher_publication_summaries(
+            retrieval_question,
+            limit=max(final_k, 7),
+        )
+        direct_publications_answer = build_direct_publications_answer(
+            question=retrieval_question,
+            results=publication_chunks,
+        )
+
+        if direct_publications_answer:
+            return RagResponse(
+                question=question,
+                answer=direct_publications_answer,
+                sources=build_sources(publication_chunks),
+                retrieved_chunks=publication_chunks,
+            )
+
     retrieved_chunks = hybrid_retrieve(
         query=retrieval_question,
         final_k=final_k,
@@ -1299,11 +1707,13 @@ def answer_question(
         max_context_chars=max_context_chars,
     )
 
-    conversation_context = build_conversation_context(
-        conversation_history=conversation_history,
-        retrieval_question=retrieval_question,
-        original_question=question,
-    )
+    conversation_context = ""
+    if retrieval_question != question:
+        conversation_context = build_conversation_context(
+            conversation_history=conversation_history,
+            retrieval_question=retrieval_question,
+            original_question=question,
+        )
 
     prompt = build_prompt(
         question=question,

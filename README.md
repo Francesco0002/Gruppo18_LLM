@@ -58,15 +58,18 @@ GROQ_MAX_RETRIES=3
 GROQ_JSON_MODE=true
 RAG_FINAL_K=7
 RAG_MAX_CONTEXT_CHARS=9000
-EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+EMBEDDING_MODEL=intfloat/multilingual-e5-small
 EMBEDDING_DEVICE=auto
-EMBEDDING_BATCH_SIZE=64
-VECTORSTORE_BATCH_SIZE=512
+EMBEDDING_BATCH_SIZE=16
+VECTORSTORE_BATCH_SIZE=256
 DENSE_INDEX_PROFILE=core
-DENSE_PDF_MIN_YEAR=2024
+DENSE_PDF_MIN_YEAR=2020
 DENSE_MAX_CHUNKS_PER_PDF=16
-RERANKER_ENABLED=true
-RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+RETRIEVAL_RERANK_K=20
+RERANKER_ENABLED=false
+RERANKER_MODEL=mixedbread-ai/mxbai-rerank-base-v2
+RERANKER_FALLBACK_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+RERANKER_BATCH_SIZE=4
 ```
 Per usare la generazione RAG è necessario disporre di una API key Groq valida.
 
@@ -171,9 +174,10 @@ Il modulo `src/retrieval.py` implementa il retrieval ibrido combinando:
 - dense retrieval, tramite embedding e Chroma;
 - Reciprocal Rank Fusion, per fondere i ranking;
 - candidate pool allargato su query originale ed espansa;
-- deduplica per URL;
-- rerank leggero basato sui metadati;
-- rerank neurale opzionale con `BAAI/bge-reranker-v2-m3`.
+- deduplica per URL o per entità strutturata, per esempio `publication_id`;
+- routing per famiglie informative del sito: docenti, ricevimento, pubblicazioni, laboratori/strumentazione, corsi, accesso, statistiche, Erasmus, dottorati, bandi/regolamenti, news e contatti;
+- rerank leggero basato su metadata, tipo chunk ed entità;
+- rerank neurale opzionale con `mixedbread-ai/mxbai-rerank-base-v2` o fallback veloce `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`.
 
 Il modulo `src/rag_chain.py` implementa la pipeline RAG completa:
 - recupera i chunk più rilevanti tramite `retrieval.py`;
@@ -192,31 +196,16 @@ Il modulo `src/app.py` fornisce l’interfaccia grafica Chainlit.
 
 La pipeline ora lavora in più stadi:
 
-1. **Chunking e embedding**: `src/chunking.py` produce chunk contestuali; `src/vector_store.py` indicizza in Chroma solo il profilo dense configurato da `DENSE_INDEX_PROFILE`, di default `core`.
+1. **Chunking e embedding**: `src/chunking.py` produce chunk contestuali e chunk sintetici per micro-fatti come ricevimento, strumentazione, pubblicazioni e documenti ufficiali; `src/vector_store.py` indicizza in Chroma solo il profilo dense configurato da `DENSE_INDEX_PROFILE`, di default `core`.
 2. **Candidate generation**: `src/retrieval.py` interroga BM25 e Chroma sia con la query originale sia con la query espansa. La query originale protegge nomi propri, sigle e codici; quella espansa migliora il richiamo sui domini noti.
-3. **Fusione e filtri**: i ranking vengono fusi con RRF, poi corretti con segnali di metadati, fonte e freschezza. PDF e pagine storiche vengono penalizzati quando la domanda non chiede esplicitamente bandi, regolamenti, PDF o anni.
-4. **Reranking neurale opzionale**: `src/reranking.py` passa i migliori candidati al cross-encoder `BAAI/bge-reranker-v2-m3` e combina score neurale e score ibrido.
-5. **Generazione**: `src/rag_chain.py` chiede a Groq un JSON con risposta, fonti usate e citazioni inline. Se JSON mode fallisce, resta il fallback compatibile con `FONTI_USATE`.
+3. **Fusione e filtri**: i ranking vengono fusi con RRF, poi corretti con segnali di intent, metadati, fonte e freschezza. PDF e pagine storiche vengono penalizzati quando la domanda non chiede esplicitamente bandi, regolamenti, PDF o anni.
+4. **Reranking neurale opzionale**: `src/reranking.py` passa i migliori candidati al cross-encoder `mixedbread-ai/mxbai-rerank-base-v2` e combina score neurale e score ibrido.
+5. **Risposte estrattive mirate**: `src/rag_chain.py` risponde deterministicamente a orari di ricevimento e liste strutturate di pubblicazioni recenti quando i chunk summary sono disponibili.
+6. **Generazione**: per gli altri casi `src/rag_chain.py` chiede a Groq un JSON con risposta, fonti usate e citazioni inline. Se JSON mode fallisce, resta il fallback compatibile con `FONTI_USATE`.
 
-Su Mac M1 con 8 GB il collo di bottiglia principale è spesso l'embedding durante la reindicizzazione, non solo il reranker. Per una build stabile usa una configurazione conservativa:
+`EMBEDDING_MAX_SEQ_LENGTH` resta un limite di sicurezza per modelli a contesto lungo su MPS. Il chunking spezza le schede sintetiche lunghe a monte, quindi nel corpus corrente il limite a 1024 non tronca i chunk generati.
 
-```env
-EMBEDDING_DEVICE=cpu
-EMBEDDING_BATCH_SIZE=4
-VECTORSTORE_BATCH_SIZE=64
-```
-
-Se anche così la build è troppo lenta o instabile, usa un embedding più leggero per la fase di test:
-
-```env
-EMBEDDING_MODEL=intfloat/multilingual-e5-base
-EMBEDDING_TRUNCATE_DIM=
-EMBEDDING_DEVICE=cpu
-EMBEDDING_BATCH_SIZE=8
-VECTORSTORE_BATCH_SIZE=128
-```
-
-In entrambi i casi, dopo aver cambiato `EMBEDDING_MODEL` o `EMBEDDING_TRUNCATE_DIM`, ricrea Chroma con `python src/vector_store.py --reset`.
+In entrambi i casi, dopo aver cambiato `EMBEDDING_MODEL`, `EMBEDDING_TRUNCATE_DIM` o `EMBEDDING_MAX_SEQ_LENGTH`, ricrea Chroma con `python src/vector_store.py --reset`.
 
 Il profilo `DENSE_INDEX_PROFILE=core` riduce il vector store dense: HTML, catalogo corsi, docenti/rubrica entrano sempre; i PDF entrano solo se recenti, regolamenti o bandi recenti. Per i PDF inclusi, `DENSE_MAX_CHUNKS_PER_PDF` limita quanti chunk entrano in Chroma. BM25 continua comunque a leggere tutti i chunk, quindi i PDF esclusi dal dense index non spariscono dalla pipeline.
 
@@ -238,11 +227,14 @@ Per una via intermedia su M1:
 
 ```env
 RERANKER_ENABLED=true
-RETRIEVAL_RERANK_K=10
-RERANKER_BATCH_SIZE=4
+RETRIEVAL_RERANK_K=20
+RERANKER_DEVICE=auto
+RERANKER_BATCH_SIZE=1
 ```
 
-Per massima qualità offline, lasciare il reranker attivo e accettare più latenza. La scelta pratica è: reranker off durante sviluppo/UI live, reranker on per benchmark e demo ragionate.
+Con `mixedbread-ai/mxbai-rerank-base-v2`, `RERANKER_DEVICE=auto` usa Apple MPS quando disponibile. Su Mac con 8 GB, mantieni `RERANKER_BATCH_SIZE=1` e aumenta solo dopo un benchmark locale.
+
+Per massima qualità compatibile con la macchina, lascia `RETRIEVAL_RERANK_K=20` e usa il reranker solo per benchmark o demo ragionate. La scelta pratica è: reranker off durante sviluppo/UI live, reranker on quando vuoi misurare la qualità finale.
 
 ## Valutazione retrieval
 

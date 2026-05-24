@@ -3,11 +3,12 @@
   padding: 8px 10px 8px 18px !important;
   display: flex !important;
   flex-direction: row !important;
-  align-items: center !important;
+  align-items: flex-end !important;
   gap: 12px !important;
   border: 1px solid hsl(var(--border) / 0.7) !important;
   border-radius: 22px !important;
   background: hsl(var(--card) / 0.96) !important;
+  overflow: visible !important;
   box-shadow:
     0 16px 40px rgb(0 0 0 / 0.18),
     inset 0 1px 0 rgb(255 255 255 / 0.04) !important;
@@ -28,12 +29,13 @@
 }
 
 #chat-input {
+  field-sizing: content !important;
   min-height: 40px !important;
-  height: 40px !important;
-  max-height: 128px !important;
+  height: auto !important;
+  max-height: min(35vh, 260px) !important;
   padding: 9px 0 !important;
   line-height: 22px !important;
-  overflow-y: auto !important;
+  overflow-y: hidden !important;
   scrollbar-width: none !important;
   caret-color: hsl(var(--primary)) !important;
 }
@@ -50,6 +52,7 @@
 #chat-submit {
   width: 38px !important;
   height: 38px !important;
+  margin-bottom: 1px !important;
   border-radius: 999px !important;
   box-shadow: 0 8px 18px hsl(var(--primary) / 0.22) !important;
 }

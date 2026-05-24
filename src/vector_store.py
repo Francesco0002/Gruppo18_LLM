@@ -16,6 +16,11 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 
+from chunk_metadata import (
+    CHUNK_METADATA_SCHEMA_VERSION,
+    chunk_metadata_value,
+    flatten_chunk_metadata,
+)
 from pipeline_io import BASE_DIR, load_jsonl, write_json
 
 
@@ -27,17 +32,18 @@ VECTORSTORE_DIR = BASE_DIR / "data" / "vectorstore" / "chroma"
 VECTORSTORE_STATS_FILE = BASE_DIR / "data" / "vectorstore" / "stats.json"
 
 COLLECTION_NAME = "diem_knowledge"
+CHUNK_CONTEXT_SCHEMA_VERSION = 4
 
 # Modello multilingua moderno, adatto a italiano + inglese e query lunghe.
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "e5-small-v2")
 EMBEDDING_FALLBACK_MODEL_NAME = os.getenv("EMBEDDING_FALLBACK_MODEL", "BAAI/bge-m3")
-EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "8"))
 EMBEDDING_TRUNCATE_DIM = os.getenv("EMBEDDING_TRUNCATE_DIM", "1024").strip()
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "auto").strip().lower()
 
-VECTORSTORE_BATCH_SIZE = int(os.getenv("VECTORSTORE_BATCH_SIZE", "512"))
+VECTORSTORE_BATCH_SIZE = int(os.getenv("VECTORSTORE_BATCH_SIZE", "128"))
 DENSE_INDEX_PROFILE = os.getenv("DENSE_INDEX_PROFILE", "core").strip().lower()
-DENSE_PDF_MIN_YEAR = int(os.getenv("DENSE_PDF_MIN_YEAR", "2024"))
+DENSE_PDF_MIN_YEAR = int(os.getenv("DENSE_PDF_MIN_YEAR", "2023"))
 DENSE_MAX_CHUNKS_PER_PDF = int(os.getenv("DENSE_MAX_CHUNKS_PER_PDF", "16"))
 
 
@@ -70,6 +76,8 @@ def expected_vectorstore_config() -> dict[str, object]:
         "dense_include_recent_pdfs": DENSE_INCLUDE_RECENT_PDFS,
         "dense_include_regulation_pdfs": DENSE_INCLUDE_REGULATION_PDFS,
         "dense_include_bando_pdfs": DENSE_INCLUDE_BANDO_PDFS,
+        "chunk_context_schema_version": CHUNK_CONTEXT_SCHEMA_VERSION,
+        "chunk_metadata_schema_version": CHUNK_METADATA_SCHEMA_VERSION,
     }
 
 
@@ -138,6 +146,13 @@ def embedding_model_kwargs(device: str) -> dict:
     return kwargs
 
 
+def embedding_encode_kwargs() -> dict:
+    return {
+        "normalize_embeddings": True,
+        "batch_size": EMBEDDING_BATCH_SIZE,
+    }
+
+
 def pick_embedding_device() -> str:
     """
     Sceglie il device per gli embedding.
@@ -172,10 +187,7 @@ def get_embedding_model() -> HuggingFaceEmbeddings:
         return HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
             model_kwargs=embedding_model_kwargs(device),
-            encode_kwargs={
-                "normalize_embeddings": True,
-                "batch_size": EMBEDDING_BATCH_SIZE,
-            },
+            encode_kwargs=embedding_encode_kwargs(),
         )
     except Exception as error:
         # Di default falliamo in modo esplicito: usare un fallback diverso senza
@@ -194,10 +206,7 @@ def get_embedding_model() -> HuggingFaceEmbeddings:
         return HuggingFaceEmbeddings(
             model_name=EMBEDDING_FALLBACK_MODEL_NAME,
             model_kwargs=embedding_model_kwargs(device),
-            encode_kwargs={
-                "normalize_embeddings": True,
-                "batch_size": EMBEDDING_BATCH_SIZE,
-            },
+            encode_kwargs=embedding_encode_kwargs(),
         )
 
 
@@ -214,15 +223,19 @@ def is_valid_chunk(chunk: dict) -> bool:
 
 
 def chunk_url(chunk: dict) -> str:
-    return str(chunk.get("source_url") or chunk.get("document_url") or "")
+    return str(
+        chunk_metadata_value(chunk, "source_url")
+        or chunk_metadata_value(chunk, "document_url")
+        or ""
+    )
 
 
 def metadata_text_for_pdf_policy(chunk: dict) -> str:
     return " ".join(
         [
             chunk_url(chunk),
-            str(chunk.get("title") or ""),
-            str(chunk.get("breadcrumb_text") or ""),
+            str(chunk_metadata_value(chunk, "title") or ""),
+            str(chunk_metadata_value(chunk, "breadcrumb_text") or ""),
         ]
     ).lower()
 
@@ -251,7 +264,7 @@ def years_in_text(text: str) -> list[int]:
 
 def is_pdf_chunk(chunk: dict) -> bool:
     url = chunk_url(chunk).lower()
-    source = str(chunk.get("source") or "").lower()
+    source = str(chunk_metadata_value(chunk, "source") or "").lower()
     return source == "pdf" or url.endswith(".pdf") or "/uploads/" in url
 
 
@@ -363,8 +376,8 @@ def should_index_dense(chunk: dict) -> bool:
 
 def dense_document_key(chunk: dict) -> str:
     return str(
-        chunk.get("document_url")
-        or chunk.get("source_url")
+        chunk_metadata_value(chunk, "document_url")
+        or chunk_metadata_value(chunk, "source_url")
         or chunk.get("document_hash")
         or chunk.get("chunk_id")
     )
@@ -434,26 +447,10 @@ def chunk_to_document(chunk: dict) -> Document:
     """
     Converte un record chunk JSON in Document LangChain.
     """
-    source_url = chunk.get("source_url") or chunk.get("document_url") or ""
-
-    metadata = {
-        "chunk_id": chunk.get("chunk_id"),
-        "document_hash": chunk.get("document_hash"),
-        "document_content_hash": chunk.get("document_content_hash"),
-        "chunk_index": chunk.get("chunk_index"),
-        "chunk_count": chunk.get("chunk_count"),
-        "source": chunk.get("source"),
-        "source_url": source_url,
-        "document_url": chunk.get("document_url"),
-        "domain": domain_from_url(source_url),
-        "title": chunk.get("title"),
-        "breadcrumb": chunk.get("breadcrumb"),
-        "breadcrumb_text": chunk.get("breadcrumb_text"),
-        "index_markdown_path": chunk.get("index_markdown_path"),
-        "last_crawled": chunk.get("last_crawled"),
-        "text_hash": chunk.get("text_hash"),
-        "chars": chunk.get("chars"),
-    }
+    metadata = flatten_chunk_metadata(chunk)
+    source_url = metadata.get("source_url") or metadata.get("document_url") or ""
+    metadata["source_url"] = source_url
+    metadata["domain"] = domain_from_url(str(source_url))
 
     clean_metadata = {
         key: clean_metadata_value(value)
@@ -469,7 +466,7 @@ def chunk_to_document(chunk: dict) -> Document:
 def count_by_source(chunks: list[dict]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for chunk in chunks:
-        source = str(chunk.get("source") or "unknown")
+        source = str(chunk_metadata_value(chunk, "source") or "unknown")
         counts[source] = counts.get(source, 0) + 1
     return counts
 
@@ -610,6 +607,8 @@ def build_stats(documents: list[Document], filter_stats: dict | None = None) -> 
         "dense_include_recent_pdfs": DENSE_INCLUDE_RECENT_PDFS,
         "dense_include_regulation_pdfs": DENSE_INCLUDE_REGULATION_PDFS,
         "dense_include_bando_pdfs": DENSE_INCLUDE_BANDO_PDFS,
+        "chunk_context_schema_version": CHUNK_CONTEXT_SCHEMA_VERSION,
+        "chunk_metadata_schema_version": CHUNK_METADATA_SCHEMA_VERSION,
         "vectorstore_dir": str(VECTORSTORE_DIR.relative_to(BASE_DIR)),
         "documents_indexed": len(documents),
         "filter": filter_stats or {},
