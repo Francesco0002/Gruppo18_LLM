@@ -352,16 +352,130 @@ def expand_known_aliases(question: str) -> str:
     return question
 
 
-def is_context_dependent_question(question: str) -> bool:
+
+
+def has_follow_up_cue(question: str) -> bool:
+    """
+    Riconosce segnali espliciti di follow-up.
+    """
+    question_lower = question.lower().strip()
+
+    follow_up_patterns = [
+        r"^e\b",
+        r"\binvece\b",
+        r"\banche\b",
+        r"\bquelli\b",
+        r"\bquelle\b",
+        r"\bquesto\b",
+        r"\bquesta\b",
+        r"\bquesti\b",
+        r"\bqueste\b",
+        r"\bsuo\b",
+        r"\bsua\b",
+        r"\bsuoi\b",
+        r"\bsue\b",
+        r"\btale\b",
+        r"\blo stesso\b",
+        r"\bla stessa\b",
+    ]
+
+    return any(re.search(pattern, question_lower) for pattern in follow_up_patterns)
+
+
+def has_explicit_standalone_topic(question: str) -> bool:
+    """
+    Riconosce domande autonome perché contengono già un tema informativo chiaro.
+    """
     question_lower = question.lower()
+
+    standalone_topics = [
+        "diem",
+        "unisa",
+        "università di salerno",
+        "universita di salerno",
+        "dipartimento",
+        "corsi",
+        "corso",
+        "laurea",
+        "lauree",
+        "triennale",
+        "triennali",
+        "magistrale",
+        "magistrali",
+        "offerta formativa",
+        "laboratori",
+        "laboratorio",
+        "strutture",
+        "aule",
+        "erasmus",
+        "accordi",
+        "dottorato",
+        "dottorati",
+        "phd",
+        "docenti",
+        "professori",
+        "personale",
+        "sede",
+        "contatti",
+        "indirizzo",
+        "bandi",
+        "bando",
+        "avvisi",
+        "servizi",
+        "ricerca",
+        "didattica",
+    ]
+
+    return any(topic in question_lower for topic in standalone_topics)
+
+
+def is_context_dependent_question(question: str) -> bool:
+    """
+    Decide se una domanda ha bisogno del contesto conversazionale.
+    Non basta che sia corta: deve contenere segnali di dipendenza
+    dal soggetto precedente.
+    """
+    question_lower = question.lower().strip()
     tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9_]+", question_lower)
 
-    if len(tokens) <= 6:
-        return True
+    if not tokens:
+        return False
 
-    return any(re.search(pattern, question_lower) for pattern in FOLLOW_UP_PATTERNS)
+    explicit_follow_up_patterns = [
+        r"\bsuo\b",
+        r"\bsua\b",
+        r"\bsuoi\b",
+        r"\bsue\b",
+        r"\bquest[oaie]\b",
+        r"\bquel(?:lo|la|li|le)?\b",
+        r"\btale\b",
+        r"\binvece\b",
+        r"^e\b",
 
+        # Follow-up su laboratori/strutture
+        r"\bquali strumenti\b",
+        r"\bche strumenti\b",
+        r"\bstrumenti possiede\b",
+        r"\bquali attrezzature\b",
+        r"\bche attrezzature\b",
+        r"\bquali dotazioni\b",
+        r"\bche dotazioni\b",
 
+        # Follow-up generici
+        r"\bdove si trova\b",
+        r"\bdi cosa si occupa\b",
+        r"\bcosa fa\b",
+        r"\bcome funziona\b",
+        r"\bquanto dura\b",
+        r"\bquando scade\b",
+    ]
+
+    return any(
+        re.search(pattern, question_lower)
+        for pattern in explicit_follow_up_patterns
+    )
+    
+    
 def extract_recent_subject(conversation_history: list[ConversationTurn] | None) -> str:
     for turn in reversed(normalize_conversation_history(conversation_history)):
         content = turn["content"]
@@ -384,6 +498,30 @@ def extract_recent_subject(conversation_history: list[ConversationTurn] | None) 
     return ""
 
 
+def rewrite_follow_up_with_subject(question: str, subject: str) -> str:
+    """
+    Riscrive domande follow-up generiche rendendole utili per il retrieval.
+    """
+    question_lower = question.lower()
+
+    if not subject:
+        return question
+
+    if "strumenti" in question_lower or "attrezzature" in question_lower or "dotazioni" in question_lower:
+        return (
+            f"Quali strumenti, attrezzature o dotazioni possiede {subject}? "
+            f"strumentazione laboratorio attrezzature dotazioni"
+        )
+
+    if "dove si trova" in question_lower or "sede" in question_lower or "ubicazione" in question_lower:
+        return f"Dove si trova {subject}? sede ubicazione laboratorio struttura"
+
+    if "di cosa si occupa" in question_lower or "cosa fa" in question_lower:
+        return f"Di cosa si occupa {subject}? attività ricerca laboratorio"
+
+    return f"{question} {subject}"
+
+
 def build_retrieval_question(
     question: str,
     conversation_history: list[ConversationTurn] | None = None,
@@ -398,6 +536,16 @@ def build_retrieval_question(
 
     if alias_expanded_question != question:
         return alias_expanded_question
+    
+     # Follow-up: "invece di Mario Di Mauro" dopo una domanda sulle pubblicazioni.
+    if "invece" in question.lower() and recent_context_was_publications(conversation_history):
+        new_subject = extract_name_after_instead(question)
+
+        if new_subject:
+            return f"quali sono le recenti pubblicazioni del professore {new_subject}?"
+    
+    if is_office_hours_query(question) and len(teacher_tokens_from_question(question)) >= 2:
+        return question
 
     if not is_context_dependent_question(question):
         return question
@@ -407,7 +555,7 @@ def build_retrieval_question(
     if not subject:
         return question
 
-    return f"{question} {subject}"
+    return rewrite_follow_up_with_subject(question, subject)
 
 
 def build_conversation_context(
@@ -458,6 +606,9 @@ Devi rispondere alla domanda dell'utente usando esclusivamente il CONTESTO forni
 Non usare conoscenza esterna.
 Non inventare informazioni mancanti.
 Non inventare date, orari, nomi di docenti, corsi, regolamenti, aule o link.
+Se la domanda non specifica un anno accademico o un periodo storico, privilegia le informazioni correnti.
+Non citare anni accademici passati, pagine storiche o versioni archiviate se non sono necessari per rispondere.
+Se nel contesto sono presenti sia informazioni correnti sia informazioni di anni precedenti, usa solo quelle correnti, salvo richiesta esplicita dell'utente.
 Se il contesto non contiene informazioni sufficienti, rispondi chiaramente:
 "Non ho trovato questa informazione nelle fonti DIEM indicizzate."
 
@@ -469,11 +620,22 @@ locali associati al docente [nome docente]:", poi elenca i locali trovati.
 
 Se la domanda non riguarda il DIEM, i corsi DIEM, i docenti DIEM, i servizi DIEM,
 le attività didattiche, di ricerca, internazionali o i documenti ufficiali indicizzati,
-rispondi chiaramente: ""La domanda è fuori dal contesto del DIEM.""
+rispondi chiaramente: "La domanda è fuori dal contesto del DIEM."
 
-Rispondi in italiano, in modo chiaro, completo e strutturato.
-Se il contesto contiene più dettagli utili, includili nella risposta.
-Per domande che chiedono elenchi, panoramiche o informazioni articolate, usa punti elenco.
+Rispondi in italiano, in modo chiaro e strutturato.
+
+Se la domanda chiede un elenco, ad esempio "quali sono", "elenca", "quali corsi", "quali docenti", "quali laboratori",
+rispondi preferibilmente con una breve frase introduttiva e poi con punti elenco.
+
+Per le domande sui corsi di laurea, lauree triennali, lauree magistrali o offerta formativa:
+- usa un elenco puntato;
+- inserisci nome del corso, codice/classe se presenti nel contesto;
+- non scrivere una risposta discorsiva lunga;
+- non aggiungere dettagli secondari, anni storici o informazioni non richieste.
+
+Se il contesto contiene più dettagli utili e pertinenti alla domanda, includili nella risposta.
+Non aggiungere dettagli secondari, storici o non richiesti solo perché presenti nel contesto.
+
 Non essere telegrafico: scrivi una risposta utile, con più frasi quando il contesto lo consente.
 Quando sono disponibili dettagli su attività, strumenti, responsabili, sedi, date o descrizioni, includili in modo ordinato.
 Non essere eccessivamente sintetico, ma non aggiungere informazioni non presenti nel contesto.
@@ -481,6 +643,7 @@ Inserisci citazioni inline nel testo, usando i numeri dei documenti: [1], [2].
 Ogni affermazione fattuale specifica deve avere almeno una citazione.
 
 Non aggiungere una sezione "Fonti" nella risposta discorsiva.
+
 Restituisci solo un oggetto JSON valido in questo formato:
 {{
   "answer": "testo della risposta con citazioni inline",
@@ -494,10 +657,10 @@ Se non hai usato nessun documento perché il contesto è insufficiente o la doma
 usa used_sources: [] e inline_citations: [].
 
 Esempio positivo:
-DOMANDA: Quali corsi di laurea offre il DIEM?
+DOMANDA: Quali sono i corsi di laurea triennale del DIEM?
 RISPOSTA JSON:
 {{
-  "answer": "Il DIEM offre corsi di laurea e laurea magistrale elencati nell'offerta formativa, tra cui Ingegneria Informatica e Ingegneria dell'Informazione per la Medicina Digitale [1].",
+  "answer": "I corsi di laurea triennale del DIEM sono:\\n- Ingegneria dell'Informazione per la Medicina Digitale, codice IE128L-8 [1];\\n- Ingegneria Informatica, codice IE127L-8 [1].",
   "used_sources": [1],
   "inline_citations": [1],
   "no_answer_reason": ""
@@ -729,30 +892,32 @@ GENERIC_TEACHER_WORDS = {
 }
 
 
-def filter_sources_by_document_indexes(
+def select_sources_and_remap_citations(
+    answer: str,
     results: list[RetrievalResult],
     used_indexes: list[int],
-) -> list[Source]:
+) -> tuple[str, list[Source]]:
     """
-    Converte gli indici dichiarati dal modello rispetto ai DOCUMENTI del contesto
-    nelle fonti corrispondenti.
+    Converte le citazioni del modello rispetto ai DOCUMENTI del contesto
+    in citazioni coerenti con la lista finale delle fonti.
 
     Esempio:
-    DOCUMENTO 1 -> Studio
-    DOCUMENTO 2 -> Studio
-    DOCUMENTO 3 -> Traineeship
+    answer cita [1][6]
+    fonti finali diventano:
+    1. Fonte del documento 1
+    2. Fonte del documento 6
 
-    Se il modello restituisce FONTI_USATE: [1, 2],
-    la fonte finale deve essere solo Studio, non Studio + Traineeship.
+    answer viene riscritto come [1][2].
     """
     if not used_indexes:
-        return []
+        return answer, []
 
-    filtered_sources: list[Source] = []
-    seen_urls: set[str] = set()
+    sources: list[Source] = []
+    seen_urls: dict[str, int] = {}
+    old_to_new_index: dict[int, int] = {}
 
-    for index in used_indexes:
-        result_position = index - 1
+    for old_index in used_indexes:
+        result_position = old_index - 1
 
         if not 0 <= result_position < len(results):
             continue
@@ -760,14 +925,49 @@ def filter_sources_by_document_indexes(
         source = get_display_source_from_result(results[result_position])
 
         if source.url in seen_urls:
+            old_to_new_index[old_index] = seen_urls[source.url]
             continue
 
-        seen_urls.add(source.url)
-        filtered_sources.append(source)
+        sources.append(source)
+        new_index = len(sources)
+        seen_urls[source.url] = new_index
+        old_to_new_index[old_index] = new_index
 
-    return filtered_sources
+    def replace_citation(match: re.Match) -> str:
+        old_index = int(match.group(1))
+        new_index = old_to_new_index.get(old_index)
+
+        if new_index is None:
+            return ""
+
+        return f"[{new_index}]"
+
+    # Rimappa le citazioni rispetto alla lista finale delle fonti.
+    remapped_answer = re.sub(r"\[(\d+)\]", replace_citation, answer)
+
+    # Pulisce eventuali citazioni duplicate consecutive, tipo [1][1].
+    remapped_answer = re.sub(r"(\[\d+\])(?:\1)+", r"\1", remapped_answer)
+
+    # Normalizza gli spazi, ma conserva gli a capo utili per gli elenchi Markdown.
+    lines = [line.rstrip() for line in remapped_answer.splitlines()]
+    remapped_answer = "\n".join(lines).strip()
+
+    return remapped_answer, sources
 
 
+def normalize_markdown_lists(answer: str) -> str:
+    """
+    Se il modello produce liste inline tipo:
+    'sono: - item 1; - item 2.'
+    le converte in elenco Markdown con a capo.
+    """
+    answer = re.sub(r":\s*-\s+", ":\n- ", answer)
+    answer = re.sub(r";\s*-\s+", ";\n- ", answer)
+    answer = re.sub(r"\.\s*-\s+", ".\n- ", answer)
+
+    return answer.strip()
+
+    
 def simple_tokenize(text: str) -> set[str]:
     tokens = re.findall(r"[a-zA-ZÀ-ÿ0-9_]+", text.lower())
 
@@ -806,6 +1006,120 @@ def metadata_tokens_for_chunk(chunk: dict[str, Any]) -> set[str]:
     return simple_tokenize(metadata_text)
 
 
+
+def is_publications_query(question: str) -> bool:
+    question_lower = question.lower()
+
+    publication_keywords = [
+        "pubblicazioni",
+        "pubblicazione",
+        "articoli",
+        "paper",
+        "papers",
+        "produzione scientifica",
+        "lavori scientifici",
+    ]
+
+    return any(keyword in question_lower for keyword in publication_keywords)
+
+
+def find_teacher_publications(question: str, limit: int = 5) -> list[dict[str, str]]:
+    """
+    Estrae pubblicazioni da chunk docenti.unisa.it/.../ricerca/pubblicazioni.
+    Ordina per anno decrescente.
+    """
+    teacher_tokens = simple_tokenize(question) - {
+        "pubblicazioni",
+        "pubblicazione",
+        "recenti",
+        "recente",
+        "articoli",
+        "articolo",
+        "paper",
+        "papers",
+        "produzione",
+        "scientifica",
+        "lavori",
+        "scientifici",
+    }
+
+    if not teacher_tokens:
+        return []
+
+    publications: list[dict[str, str]] = []
+
+    pattern = re.compile(
+        r"####\s+\d+\[([^\]]+)\]\([^)]+\)\s*\|\s*(\d{4})",
+        flags=re.MULTILINE,
+    )
+
+    for chunk in load_rag_chunks():
+        url = str(chunk.get("source_url") or chunk.get("document_url") or "")
+        title = str(chunk.get("title") or "")
+        breadcrumb_text = str(chunk.get("breadcrumb_text") or "")
+        text = str(chunk.get("text") or "")
+
+        if "docenti.unisa.it" not in url:
+            continue
+
+        if "/ricerca/pubblicazioni" not in url:
+            continue
+
+        metadata_text = f"{title} {breadcrumb_text} {url}".lower()
+        metadata_tokens = simple_tokenize(metadata_text)
+
+        if not teacher_tokens.issubset(metadata_tokens):
+            continue
+
+        for pub_title, year in pattern.findall(text):
+            publications.append(
+                {
+                    "title": pub_title.strip(),
+                    "year": year.strip(),
+                    "url": url,
+                    "source_title": title,
+                }
+            )
+
+    unique: dict[tuple[str, str], dict[str, str]] = {}
+
+    for pub in publications:
+        key = (pub["title"], pub["year"])
+        unique[key] = pub
+
+    sorted_publications = sorted(
+        unique.values(),
+        key=lambda pub: int(pub["year"]),
+        reverse=True,
+    )
+
+    return sorted_publications[:limit]
+
+
+def teacher_profile_matches_query(question: str, chunk: dict[str, Any]) -> bool:
+    """
+    Match stretto per le pagine docente.
+    Per una query tipo 'orari di ricevimento antonio greco',
+    accetta solo pagine il cui titolo/breadcrumb contengono sia 'antonio' sia 'greco'.
+    """
+    teacher_tokens = teacher_tokens_from_question(question)
+
+    if not teacher_tokens:
+        return False
+
+    metadata_text = " ".join(
+        str(chunk.get(key) or "")
+        for key in ["title", "breadcrumb", "breadcrumb_text", "source_url", "document_url"]
+    ).lower()
+
+    metadata_tokens = simple_tokenize(metadata_text)
+
+    if len(teacher_tokens) >= 2:
+        return teacher_tokens.issubset(metadata_tokens)
+
+    return bool(teacher_tokens.intersection(metadata_tokens))
+
+
 def find_teacher_profile_office_hours(question: str) -> list[RetrievalResult]:
     teacher_tokens = teacher_tokens_from_question(question)
     if not teacher_tokens:
@@ -818,11 +1132,7 @@ def find_teacher_profile_office_hours(question: str) -> list[RetrievalResult]:
         if "docenti.unisa.it" not in url:
             continue
 
-        combined_tokens = metadata_tokens_for_chunk(chunk).union(
-            simple_tokenize(str(chunk.get("text") or ""))
-        )
-
-        if not teacher_metadata_matches(teacher_tokens, combined_tokens):
+        if not teacher_profile_matches_query(question, chunk):
             continue
 
         text_lower = str(chunk.get("text") or "").lower()
@@ -887,10 +1197,9 @@ def is_specific_office_hours_query(question: str) -> bool:
     question_lower = question.lower()
 
     asks_office_hours = is_office_hours_query(question_lower)
-
     teacher_name_tokens = simple_tokenize(question_lower)
 
-    return asks_office_hours and bool(teacher_name_tokens)
+    return asks_office_hours and len(teacher_name_tokens) >= 2
 
 
 def is_generic_office_hours_query(question: str) -> bool:
@@ -989,6 +1298,16 @@ def is_out_of_scope_department_query(question: str) -> bool:
     return asks_department_info and mentions_named_department
 
 
+def extract_inline_citation_indexes(answer: str) -> list[int]:
+    """
+    Estrae gli indici citati davvero nel testo della risposta, ad esempio [1], [2].
+    Serve per evitare di mostrare fonti che il modello dichiara in used_sources
+    ma che non cita realmente nella risposta.
+    """
+    indexes = re.findall(r"\[(\d+)\]", answer)
+    return sorted({int(index) for index in indexes})
+
+
 def teacher_metadata_matches(
     teacher_name_tokens: set[str],
     metadata_tokens: set[str],
@@ -1046,6 +1365,54 @@ def clean_markdown_text(text: str) -> str:
     text = text.replace("**", "")
     text = text.replace("*", "")
     return " ".join(text.split())
+
+
+
+def recent_context_was_publications(conversation_history: list[ConversationTurn] | None) -> bool:
+    """
+    Capisce se negli ultimi turni si parlava di pubblicazioni.
+    Serve per follow-up tipo: "invece di Mario Di Mauro".
+    """
+    if not conversation_history:
+        return False
+
+    recent_turns = conversation_history[-4:]
+
+    text = " ".join(
+        str(turn.get("content") or "")
+        for turn in recent_turns
+    ).lower()
+
+    publication_markers = [
+        "pubblicazioni",
+        "pubblicazione",
+        "paper",
+        "papers",
+        "articoli",
+        "produzione scientifica",
+        "lavori scientifici",
+    ]
+
+    return any(marker in text for marker in publication_markers)
+
+
+def extract_name_after_instead(question: str) -> str:
+    """
+    Estrae il nuovo soggetto da follow-up tipo:
+    - invece di Mario Di Mauro
+    - e Mario Di Mauro invece?
+    - invece Fabio Postiglione
+    """
+    text = question.strip()
+    text = re.sub(r"[?!.]+$", "", text).strip()
+
+    text = re.sub(r"^\s*e\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\binvece\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*di\s+", "", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
 
 
 def extract_office_hours_rows(text: str) -> list[tuple[str, str, str]]:
@@ -1242,6 +1609,36 @@ def answer_question(
             sources=[],
             retrieved_chunks=[],
         )
+        
+    if is_publications_query(retrieval_question):
+        publications = find_teacher_publications(retrieval_question, limit=5)
+
+        if publications:
+            source_url = publications[0]["url"]
+            source_title = publications[0]["source_title"] or "Pubblicazioni docente"
+
+            lines = [
+                "Le pubblicazioni più recenti trovate nelle fonti indicizzate sono:"
+            ]
+
+            for pub in publications:
+                lines.append(f"- {pub['year']} — {pub['title']} [1]")
+
+            answer = "\n".join(lines)
+
+            return RagResponse(
+                question=question,
+                answer=answer,
+                sources=[
+                    Source(
+                        title=source_title,
+                        url=clean_display_url(source_url),
+                        breadcrumb="",
+                        chunk_id="",
+                    )
+                ],
+                retrieved_chunks=[],
+            )
 
     retrieved_chunks = hybrid_retrieve(
         query=retrieval_question,
@@ -1318,13 +1715,22 @@ def answer_question(
 
     clean_answer, used_source_indexes = parse_model_answer(raw_answer)
 
+    # Usa come fonte di verità le citazioni realmente presenti nel testo.
+    # Esempio: se la risposta contiene solo [1], mostriamo solo la fonte 1,
+    # anche se il modello in used_sources ha scritto [1, 2, 5].
+    inline_citation_indexes = extract_inline_citation_indexes(clean_answer)
+
+    if inline_citation_indexes:
+        used_source_indexes = inline_citation_indexes
+
     all_sources = build_sources(retrieved_chunks)
 
-    used_sources = filter_sources_by_document_indexes(
+    clean_answer, used_sources = select_sources_and_remap_citations(
+        answer=clean_answer,
         results=retrieved_chunks,
         used_indexes=used_source_indexes,
     )
-
+    clean_answer = normalize_markdown_lists(clean_answer)
     # Fallback:
     # se il modello non rispetta il formato FONTI_USATE,
     # mostriamo solo la prima fonte recuperata invece di tutte le fonti rumorose.
@@ -1341,8 +1747,6 @@ def answer_question(
             "non riguarda le fonti diem",
         ]
     )
-    
-    
 
     if not used_sources and all_sources and not is_no_source_answer:
         used_sources = all_sources[:1]

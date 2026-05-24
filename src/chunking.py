@@ -255,10 +255,26 @@ def split_long_text(text: str, chunk_size: int, overlap: int) -> list[str]:
     return chunks
 
 
+def is_protected_short_section(chunk: str) -> bool:
+    """
+    Alcune sezioni sono corte ma importanti e non devono essere eliminate.
+    Esempio: orari di ricevimento con una sola riga.
+    """
+    chunk_lower = chunk.lower()
+
+    protected_markers = [
+        "orario di ricevimento",
+        "ricevimento",
+    ]
+
+    return any(marker in chunk_lower for marker in protected_markers)
+
+
 def merge_small_chunks(chunks: list[str], min_chars: int, max_chars: int) -> list[str]:
     """
     Unisce chunk troppo piccoli quando possibile.
-    Evita chunk inutili da poche parole.
+    Evita chunk inutili da poche parole, ma non elimina sezioni corte importanti
+    come gli orari di ricevimento.
     """
     if not chunks:
         return []
@@ -278,7 +294,9 @@ def merge_small_chunks(chunks: list[str], min_chars: int, max_chars: int) -> lis
 
         candidate = buffer + "\n\n" + chunk
 
-        if len(buffer) < min_chars and len(candidate) <= max_chars:
+        # Se il buffer è piccolo oppure il nuovo chunk è piccolo,
+        # proviamo a unirli invece di rischiare di perdere il chunk corto.
+        if (len(buffer) < min_chars or len(chunk) < min_chars) and len(candidate) <= max_chars:
             buffer = candidate
         else:
             merged.append(buffer.strip())
@@ -287,8 +305,11 @@ def merge_small_chunks(chunks: list[str], min_chars: int, max_chars: int) -> lis
     if buffer:
         merged.append(buffer.strip())
 
-    # Se tutti i chunk sono piccoli, teniamo comunque il più grande.
-    good_chunks = [chunk for chunk in merged if len(chunk) >= min_chars]
+    good_chunks = [
+        chunk
+        for chunk in merged
+        if len(chunk) >= min_chars or is_protected_short_section(chunk)
+    ]
 
     if good_chunks:
         return good_chunks
