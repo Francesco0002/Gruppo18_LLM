@@ -446,6 +446,37 @@ def expand_query_for_retrieval(query: str) -> str:
             ]
         )
 
+    wants_bachelor_degree = any(
+        keyword in query_lower
+        for keyword in [
+            "triennale",
+            "triennali",
+            "laurea triennale",
+            "lauree triennali",
+            "corsi triennali",
+            "corsi triennale",
+            "l-8",
+            "classe l-8",
+            "ie127l-8",
+            "ie128l-8",
+        ]
+    )
+
+    wants_master_degree = any(
+        keyword in query_lower
+        for keyword in [
+            "magistrale",
+            "magistrali",
+            "laurea magistrale",
+            "lauree magistrali",
+            "lm-32",
+            "lm-28",
+            "ie227lm-32",
+            "ie232lm-32",
+            "ie233lm-28",
+        ]
+    )
+
     wants_degree_info = any(
         keyword in query_lower
         for keyword in [
@@ -453,7 +484,6 @@ def expand_query_for_retrieval(query: str) -> str:
             "corso di laurea",
             "lauree",
             "laurea",
-            "laurea magistrale",
             "offerta formativa",
             "corsi di studio",
             "programmi di studio",
@@ -462,19 +492,59 @@ def expand_query_for_retrieval(query: str) -> str:
             "corsi offerti",
             "corsi disponibili",
         ]
-    )
+    ) or wants_bachelor_degree or wants_master_degree
 
     if wants_degree_info:
         expanded_terms.extend(
             [
-                "offerta formativa",
-                "corsi di laurea",
-                "laurea magistrale",
-                "didattica",
+                "DIEM",
+                "Didattica",
+                "Offerta Formativa",
                 "corsi di studio",
             ]
         )
 
+        if wants_bachelor_degree and not wants_master_degree:
+            expanded_terms.extend(
+                [
+                    "CORSO DI LAUREA",
+                    "L-8",
+                    "classe L-8",
+                    "IE127L-8",
+                    "IE128L-8",
+                    "Ingegneria Informatica",
+                    "Ingegneria dell'Informazione per la Medicina Digitale",
+                ]
+            )
+
+        elif wants_master_degree and not wants_bachelor_degree:
+            expanded_terms.extend(
+                [
+                    "CORSO DI LAUREA MAGISTRALE",
+                    "LM-32",
+                    "LM-28",
+                    "IE227LM-32",
+                    "IE232LM-32",
+                    "IE233LM-28",
+                    "Ingegneria Informatica magistrale",
+                    "Information Engineering for Digital Medicine",
+                    "Electrical Engineering for Digital Energy",
+                ]
+            )
+
+        else:
+            expanded_terms.extend(
+                [
+                    "corsi di laurea",
+                    "corsi di laurea magistrale",
+                    "CORSO DI LAUREA",
+                    "CORSO DI LAUREA MAGISTRALE",
+                    "L-8",
+                    "LM-32",
+                    "LM-28",
+                ]
+            )
+        
     wants_structures_info = any(
         keyword in query_lower
         for keyword in [
@@ -1522,6 +1592,43 @@ def rerank_with_metadata_signals(
             "corsi offerti",
             "corsi disponibili",
         ]
+    )
+
+    wants_bachelor_degree = any(
+        keyword in query_lower
+        for keyword in [
+            "triennale",
+            "triennali",
+            "laurea triennale",
+            "lauree triennali",
+            "corsi triennali",
+            "corsi triennale",
+            "l-8",
+            "classe l-8",
+            "ie127l-8",
+            "ie128l-8",
+        ]
+    )
+
+    wants_master_degree = any(
+        keyword in query_lower
+        for keyword in [
+            "magistrale",
+            "magistrali",
+            "laurea magistrale",
+            "lauree magistrali",
+            "lm-32",
+            "lm-28",
+            "ie227lm-32",
+            "ie232lm-32",
+            "ie233lm-28",
+        ]
+    )
+
+    wants_degree_info = (
+        wants_degree_info
+        or wants_bachelor_degree
+        or wants_master_degree
     ) and not wants_final_exam_info
 
     wants_teaching_info = any(
@@ -1538,7 +1645,7 @@ def rerank_with_metadata_signals(
             "programmi",
         ]
     )
-    
+
     wants_admission_info = any(
         keyword in query_lower
         for keyword in [
@@ -1557,14 +1664,6 @@ def rerank_with_metadata_signals(
         ]
     ) and not wants_final_exam_info
 
-    wants_master_degree = any(
-        keyword in query_lower
-        for keyword in [
-            "magistrale",
-            "laurea magistrale",
-        ]
-    )
-    
     wants_phd_info = any(
         keyword in query_lower
         for keyword in [
@@ -1728,6 +1827,41 @@ def rerank_with_metadata_signals(
 
             if "didattica" in title or "didattica" in breadcrumb:
                 adjusted_score *= 1.05
+                
+        text_lower = result.text.lower()
+        url_lower = str(url).lower()
+
+        if wants_bachelor_degree and not wants_master_degree:
+            if "didattica/offerta-formativa" in url_lower:
+                adjusted_score *= 4.00
+
+            if "corso di laurea" in text_lower and "l-8" in text_lower:
+                adjusted_score *= 4.00
+
+            if "ie127l-8" in text_lower or "ie128l-8" in text_lower:
+                adjusted_score *= 4.00
+
+            if "corso di laurea magistrale" in text_lower:
+                adjusted_score *= 0.15
+
+            if "focus della didattica" in title or "focus della didattica" in breadcrumb:
+                adjusted_score *= 0.20
+
+            if "percorso di eccellenza" in text_lower or "percorso di eccellenza" in title:
+                adjusted_score *= 0.10
+
+        elif wants_master_degree and not wants_bachelor_degree:
+            if "didattica/offerta-formativa" in url_lower:
+                adjusted_score *= 1.80
+
+            if "corso di laurea magistrale" in text_lower:
+                adjusted_score *= 2.00
+
+            if "lm-32" in text_lower or "lm-28" in text_lower:
+                adjusted_score *= 2.20
+
+            if "percorso di eccellenza" in text_lower or "percorso di eccellenza" in title:
+                adjusted_score *= 0.35
 
         # Query su esame finale / sedute di laurea:
         # "accesso alla seduta" non è accesso al corso.
