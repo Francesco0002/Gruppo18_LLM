@@ -15,6 +15,12 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
+from langchain_core.embeddings import Embeddings
+
+try:
+    from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+except ImportError:
+    FastEmbedEmbeddings = None
 
 from chunk_metadata import (
     CHUNK_METADATA_SCHEMA_VERSION,
@@ -264,12 +270,29 @@ def pick_embedding_device() -> str:
 
 
 @lru_cache(maxsize=1)
-def get_embedding_model() -> HuggingFaceEmbeddings:
+def get_embedding_model() -> Embeddings:
     """
     Carica il modello di embedding HuggingFace.
     La prima esecuzione può richiedere tempo perché scarica il modello.
     Usa automaticamente MPS (Apple Silicon), CUDA (NVIDIA) o CPU in base all'hardware.
     """
+    
+    if EMBEDDING_BACKEND == "fastembed":
+        if FastEmbedEmbeddings is None:
+            raise RuntimeError(
+                "FastEmbed non disponibile. Installa con: "
+                "pip install fastembed langchain-community"
+            )
+
+        print(f"Embedding model: {EMBEDDING_MODEL_NAME}")
+        print("Embedding backend: fastembed")
+        print("Embedding device: cpu")
+
+        return FastEmbedEmbeddings(
+            model_name=EMBEDDING_MODEL_NAME,
+            batch_size=EMBEDDING_BATCH_SIZE,
+        )
+        
     device = pick_embedding_device()
     model_name = runtime_embedding_model_name()
     print(f"Embedding model: {model_name}")
