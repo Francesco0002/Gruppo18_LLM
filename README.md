@@ -123,7 +123,7 @@ python src/vector_store.py --query "Quali corsi di laurea offre il DIEM?"
 Retrieval ibrido BM25 + dense:
 
 ```bash
-python src/retrieval.py --query "Quali corsi di laurea offre il DIEM?"
+python src/retrieval.py --query "Quali corsi di laurea offre il DIEM?" --final-k 5
 ```
 
 Chatbot RAG da terminale:
