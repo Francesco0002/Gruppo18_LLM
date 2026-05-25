@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env", override=True)
+load_dotenv(BASE_DIR / ".env", override=False)
 
 DEFAULT_RERANKER_MODEL = "mixedbread-ai/mxbai-rerank-base-v2"
 FALLBACK_RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
@@ -21,8 +21,10 @@ RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL)
 RERANKER_FALLBACK_MODEL_NAME = os.getenv("RERANKER_FALLBACK_MODEL", FALLBACK_RERANKER_MODEL)
 RERANKER_BACKEND = os.getenv("RERANKER_BACKEND", "auto").strip().lower()
 RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "auto").strip().lower()
-RERANKER_WEIGHT = float(os.getenv("RERANKER_WEIGHT", "0.75"))
-HYBRID_WEIGHT = float(os.getenv("HYBRID_WEIGHT", "0.25"))
+# Peso conservativo: il cross-encoder migliora precisione top-k, ma il retrieval
+# ibrido/structured deve continuare a proteggere il recall.
+RERANKER_WEIGHT = float(os.getenv("RERANKER_WEIGHT", "0.60"))
+HYBRID_WEIGHT = float(os.getenv("HYBRID_WEIGHT", "0.40"))
 RERANKER_BATCH_SIZE = int(os.getenv("RERANKER_BATCH_SIZE", "4"))
 
 
@@ -80,18 +82,7 @@ def cross_encoder_relevance_score(value: float) -> float:
     return sigmoid(value)
 
 
-def selected_reranker_backend(model_name: str | None = None) -> str:
-    if RERANKER_BACKEND and RERANKER_BACKEND != "auto":
-        return RERANKER_BACKEND
-
-    model = (model_name or RERANKER_MODEL_NAME).lower()
-    if "jina-reranker-v3" in model:
-        return "jina"
-
-    return "cross_encoder"
-
-
-def resolve_reranker_device(backend: str | None = None) -> str | None:
+def resolve_reranker_device() -> str | None:
     if RERANKER_DEVICE in {"", "none"}:
         return None
 
@@ -102,15 +93,6 @@ def resolve_reranker_device(backend: str | None = None) -> str | None:
         import torch
     except Exception:
         return None
-
-    resolved_backend = backend or selected_reranker_backend()
-    if (
-        resolved_backend == "jina"
-        and getattr(torch.backends, "mps", None)
-        and torch.backends.mps.is_available()
-        and not truthy_env("RERANKER_JINA_ALLOW_MPS", default=False)
-    ):
-        return "cpu"
 
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
@@ -129,38 +111,9 @@ def get_reranker():
     Il primo caricamento può essere lento perché inizializza i pesi; le query
     successive riusano lo stesso oggetto, cosa importante per Chainlit.
     """
-    backend = selected_reranker_backend()
-
-    if backend == "jina":
-        from transformers import AutoModel
-
-        load_kwargs = {
-            "trust_remote_code": truthy_env("RERANKER_TRUST_REMOTE_CODE", default=True),
-        }
-
-        try:
-            model = AutoModel.from_pretrained(
-                RERANKER_MODEL_NAME,
-                dtype="auto",
-                **load_kwargs,
-            )
-        except TypeError:
-            model = AutoModel.from_pretrained(
-                RERANKER_MODEL_NAME,
-                torch_dtype="auto",
-                **load_kwargs,
-            )
-
-        device = resolve_reranker_device(backend)
-        if device:
-            model = model.to(device)
-
-        model.eval()
-        return model
-
     from sentence_transformers import CrossEncoder
 
-    device = resolve_reranker_device(backend)
+    device = resolve_reranker_device()
     cross_encoder_kwargs = {
         "trust_remote_code": truthy_env("RERANKER_TRUST_REMOTE_CODE", default=True),
     }
@@ -285,11 +238,7 @@ def neural_rerank(
     candidates = results[:top_k]
 
     try:
-        backend = selected_reranker_backend()
-        if backend == "jina":
-            reranker_scores = jina_rerank_scores(query, candidates)
-        else:
-            reranker_scores = cross_encoder_rerank_scores(query, candidates)
+        reranker_scores = cross_encoder_rerank_scores(query, candidates)
     except Exception:
         if truthy_env("RERANKER_STRICT", default=False):
             raise
@@ -306,7 +255,6 @@ def neural_rerank(
         # Conserviamo gli score intermedi nei metadata per debug/evaluation.
         result.metadata["reranker_score"] = reranker_score
         result.metadata["pre_rerank_score"] = result.score
-        result.metadata["reranker_backend"] = backend
         result.score = (RERANKER_WEIGHT * reranker_score) + (HYBRID_WEIGHT * hybrid_score)
 
     reranked = sorted(candidates, key=lambda result: result.score, reverse=True)

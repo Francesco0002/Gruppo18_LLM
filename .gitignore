@@ -245,10 +245,11 @@ logs/
 # Configurazione locale: in git va solo config.example.yaml; ogni
 # membro del gruppo crea il proprio config.yaml a partire dal template.
 /config.yaml
-
+models/granite-embedding-97m-multilingual-r2-onnx-arm64-int8
 tests/test_bugfixes.py
 tests/test_clean_pipeline.py
 tests/test_pdf_backfill.py
 data/vectorstore/
 src/clean_pipeline.py
+src/export_embedding_onnx.py
 backups/

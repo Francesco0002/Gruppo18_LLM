@@ -56,9 +56,12 @@ GROQ_MODEL=qwen/qwen3-32b
 GROQ_TIMEOUT_SECONDS=60
 GROQ_MAX_RETRIES=3
 GROQ_JSON_MODE=true
-RAG_FINAL_K=7
-RAG_MAX_CONTEXT_CHARS=9000
+RAG_FINAL_K=10
+RAG_MAX_CONTEXT_CHARS=12000
 EMBEDDING_MODEL=intfloat/multilingual-e5-small
+EMBEDDING_BACKEND=torch
+EMBEDDING_ONNX_MODEL_PATH=
+EMBEDDING_ONNX_PROVIDER=CPUExecutionProvider
 EMBEDDING_DEVICE=auto
 EMBEDDING_BATCH_SIZE=16
 VECTORSTORE_BATCH_SIZE=256
@@ -69,6 +72,8 @@ RETRIEVAL_RERANK_K=20
 RERANKER_ENABLED=false
 RERANKER_MODEL=mixedbread-ai/mxbai-rerank-base-v2
 RERANKER_FALLBACK_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+RERANKER_WEIGHT=0.60
+HYBRID_WEIGHT=0.40
 RERANKER_BATCH_SIZE=4
 ```
 Per usare la generazione RAG è necessario disporre di una API key Groq valida.
@@ -196,16 +201,37 @@ Il modulo `src/app.py` fornisce l’interfaccia grafica Chainlit.
 
 La pipeline ora lavora in più stadi:
 
-1. **Chunking e embedding**: `src/chunking.py` produce chunk contestuali e chunk sintetici per micro-fatti come ricevimento, strumentazione, pubblicazioni e documenti ufficiali; `src/vector_store.py` indicizza in Chroma solo il profilo dense configurato da `DENSE_INDEX_PROFILE`, di default `core`.
-2. **Candidate generation**: `src/retrieval.py` interroga BM25 e Chroma sia con la query originale sia con la query espansa. La query originale protegge nomi propri, sigle e codici; quella espansa migliora il richiamo sui domini noti.
-3. **Fusione e filtri**: i ranking vengono fusi con RRF, poi corretti con segnali di intent, metadati, fonte e freschezza. PDF e pagine storiche vengono penalizzati quando la domanda non chiede esplicitamente bandi, regolamenti, PDF o anni.
-4. **Reranking neurale opzionale**: `src/reranking.py` passa i migliori candidati al cross-encoder `mixedbread-ai/mxbai-rerank-base-v2` e combina score neurale e score ibrido.
-5. **Risposte estrattive mirate**: `src/rag_chain.py` risponde deterministicamente a orari di ricevimento e liste strutturate di pubblicazioni recenti quando i chunk summary sono disponibili.
-6. **Generazione**: per gli altri casi `src/rag_chain.py` chiede a Groq un JSON con risposta, fonti usate e citazioni inline. Se JSON mode fallisce, resta il fallback compatibile con `FONTI_USATE`.
+1. **Chunking multi-rappresentazione**: `src/chunking.py` salva `body_text`, `locator_text` e `text_for_display`. L'embedding primario usa solo il corpo, mentre il locator contiene metadati compatti come corso, anno, curriculum, docente, fonte e topic.
+2. **Vector store body + locator**: `src/vector_store.py` crea due collection Chroma: `diem_knowledge` per il contenuto e `diem_knowledge_locator` per i locator compatti. Dopo questo aggiornamento va eseguito `python src/vector_store.py --reset`.
+3. **Candidate generation evidence-first**: `src/retrieval.py` combina BM25, dense body, dense locator ed evidenze strutturate da `src/structured_evidence.py`, guidate dal planner leggero `src/query_planner.py`.
+4. **Fusione senza boost opachi**: i ranking vengono fusi con RRF; le evidenze strutturate vengono solo portate in testa quando la query richiede chiaramente tabelle/listati ufficiali, senza generare risposte predefinite.
+5. **Reranking neurale opzionale**: `src/reranking.py` passa i migliori candidati al cross-encoder e combina score neurale e score ibrido in modo più conservativo.
+6. **Generazione**: `src/rag_chain.py` usa sempre il retrieval principale. Le risposte estrattive per ricevimento/pubblicazioni sono post-processing sulle evidenze recuperate, non bypass del retrieval.
 
 `EMBEDDING_MAX_SEQ_LENGTH` resta un limite di sicurezza per modelli a contesto lungo su MPS. Il chunking spezza le schede sintetiche lunghe a monte, quindi nel corpus corrente il limite a 1024 non tronca i chunk generati.
 
-In entrambi i casi, dopo aver cambiato `EMBEDDING_MODEL`, `EMBEDDING_TRUNCATE_DIM` o `EMBEDDING_MAX_SEQ_LENGTH`, ricrea Chroma con `python src/vector_store.py --reset`.
+In entrambi i casi, dopo aver cambiato `EMBEDDING_MODEL`, `EMBEDDING_TRUNCATE_DIM`, `EMBEDDING_MAX_SEQ_LENGTH` o lo schema dei chunk, ricrea Chroma con `python src/vector_store.py --reset`.
+
+Su Mac M1 puoi usare il Granite 97M esportato in ONNX quantizzato ARM64:
+
+```bash
+pip install 'sentence-transformers[onnx]' onnx
+python src/export_embedding_onnx.py \
+  --model ibm-granite/granite-embedding-97m-multilingual-r2 \
+  --output models/granite-embedding-97m-multilingual-r2-onnx-arm64-int8
+```
+
+Poi imposta:
+
+```env
+EMBEDDING_MODEL=ibm-granite/granite-embedding-97m-multilingual-r2
+EMBEDDING_BACKEND=onnx
+EMBEDDING_ONNX_MODEL_PATH=models/granite-embedding-97m-multilingual-r2-onnx-arm64-int8
+EMBEDDING_ONNX_PROVIDER=CPUExecutionProvider
+EMBEDDING_DEVICE=cpu
+```
+
+Per ONNX quantizzato su Apple Silicon è preferibile `CPUExecutionProvider`: MPS non è usato da ONNX Runtime e CoreML può introdurre tempi di compilazione o incompatibilità con modelli int8.
 
 Il profilo `DENSE_INDEX_PROFILE=core` riduce il vector store dense: HTML, catalogo corsi, docenti/rubrica entrano sempre; i PDF entrano solo se recenti, regolamenti o bandi recenti. Per i PDF inclusi, `DENSE_MAX_CHUNKS_PER_PDF` limita quanti chunk entrano in Chroma. BM25 continua comunque a leggere tutti i chunk, quindi i PDF esclusi dal dense index non spariscono dalla pipeline.
 
@@ -239,6 +265,14 @@ Per massima qualità compatibile con la macchina, lascia `RETRIEVAL_RERANK_K=20`
 ## Valutazione retrieval
 
 Il file `eval/golden_questions.jsonl` contiene domande di test con pattern URL attesi. Le query senza fonti attese, ad esempio fuori dominio o ricevimento generico, sono incluse per documentare i casi guardrail ma non entrano nelle metriche retrieval.
+
+Il file `eval/golden_questions_topic_coverage.jsonl` aggiunge una suite multi-topic per piani di studio, corsi, docenti, ricevimento, pubblicazioni, ricerca, terza missione, international, dottorati, laboratori, documenti e qualità/statistiche.
+
+Per controllare che manifest e chunk coprano tutte le aree core:
+
+```bash
+python src/coverage_audit.py --fail-on-gaps
+```
 
 Esegui una valutazione veloce della configurazione corrente:
 

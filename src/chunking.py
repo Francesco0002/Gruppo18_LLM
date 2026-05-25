@@ -28,16 +28,16 @@ CHUNKS_FILE = CHUNKS_DIR / "chunks.jsonl"
 STATS_FILE = CHUNKS_DIR / "stats.json"
 
 # Parametri principali
-CHUNK_SIZE = 1200
-CHUNK_OVERLAP = 180
+CHUNK_SIZE = 1500
+CHUNK_OVERLAP = 250
 MIN_CHUNK_CHARS = 150
 SYNTHETIC_CHUNK_SIZE = 1400
 SYNTHETIC_CHUNK_OVERLAP = 160
 
 # Parametri per documenti molto grandi
 LARGE_DOC_THRESHOLD = 50_000
-LARGE_DOC_CHUNK_SIZE = 1500
-LARGE_DOC_OVERLAP = 220
+LARGE_DOC_CHUNK_SIZE = 2000
+LARGE_DOC_OVERLAP = 300
 
 
 PROTECTED_SECTION_PATTERNS = [
@@ -187,6 +187,14 @@ def markdown_heading_from_section(section: str) -> str:
         if re.match(r"^#{1,6}\s+", line):
             return clean_heading_text(line)
     return ""
+
+
+def markdown_heading_level_from_section(section: str) -> int:
+    for line in section.splitlines():
+        match = re.match(r"^(#{1,6})\s+", line)
+        if match:
+            return len(match.group(1))
+    return 0
 
 
 def first_content_heading(text: str) -> str:
@@ -372,6 +380,249 @@ def is_course_catalogue_record(record: dict) -> bool:
     return "coursecatalogue" in url
 
 
+def parse_course_year(text: str) -> int | str:
+    match = re.search(r"\b([123])\s*(?:°|o)?\s*anno\b", text, re.IGNORECASE)
+    if not match:
+        return ""
+    return int(match.group(1))
+
+
+def parse_academic_year(record: dict) -> int | str:
+    url = str(record.get("url") or record.get("document_url") or "")
+    match = re.search(r"/(?:corsi|insegnamenti)/((?:19|20)\d{2})(?:/|\?|$)", url)
+    if match:
+        return int(match.group(1))
+
+    years = years_from_record(record)
+    return max(years) if years else ""
+
+
+def parse_curriculum_and_cohort(heading: str) -> tuple[str, int | str]:
+    cleaned = clean_heading_text(heading)
+    match = re.search(
+        r"\bpercorso\s*:\s*(.+?)(?:\s*[-–]\s*coorte\s*((?:19|20)\d{2}))?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if not match:
+        return "", ""
+
+    curriculum = " ".join(match.group(1).split()).strip()
+    cohort = int(match.group(2)) if match.group(2) else ""
+    return curriculum, cohort
+
+
+def course_name_from_record(record: dict, document_content_title: str = "") -> str:
+    title = str(record.get("title") or "").strip()
+    candidate = document_content_title or title
+    candidate = clean_heading_text(candidate)
+
+    if "|" in candidate:
+        candidate = candidate.split("|", 1)[0].strip()
+
+    return " ".join(candidate.split()).strip()
+
+
+def infer_course_level(record: dict, text: str = "") -> str:
+    probe = " ".join(
+        metadata_text(record.get(key)).lower()
+        for key in ["url", "document_url", "title", "breadcrumb", "link_text"]
+    )
+    probe = f"{probe} {text[:1200].lower()}"
+
+    if "laurea magistrale" in probe or "lm-" in probe:
+        return "laurea_magistrale"
+    if "dottorato" in probe or "phd" in probe:
+        return "dottorato"
+    if "laurea triennale" in probe or "corso di laurea" in probe or "l-" in probe:
+        return "laurea_triennale"
+    return ""
+
+
+def topic_family_from_record(record: dict, chunk_kind: str, text: str = "") -> str:
+    url = str(record.get("url") or record.get("document_url") or "").lower()
+    probe = " ".join(
+        [
+            url,
+            metadata_text(record.get("title")).lower(),
+            metadata_text(record.get("breadcrumb")).lower(),
+            chunk_kind.lower(),
+            text[:800].lower(),
+        ]
+    )
+
+    if chunk_kind in {"study_plan", "course_syllabus", "course_info", "course_statistic"}:
+        return "didattica"
+    if chunk_kind in {"office_hours", "teacher_publications_page", "teacher_projects", "publication_summary"}:
+        return "docenti"
+    if chunk_kind == "lab_equipment" or "/ricerca/laboratori" in url or "/dipartimento/strutture" in url:
+        return "laboratori"
+    if chunk_kind in {"erasmus"} or "erasmus" in probe or "international" in probe:
+        return "international"
+    if chunk_kind == "phd" or "dottorato" in probe:
+        return "dottorati"
+    if "terza-missione" in url or "trasferimento tecnologico" in probe or "public engagement" in probe:
+        return "terza_missione"
+    if "/ricerca/" in url or "progetti finanziati" in probe or "aree di ricerca" in probe:
+        return "ricerca"
+    if "bando" in probe or "graduatoria" in probe or "avviso" in probe:
+        return "bandi"
+    if "almalaurea" in probe or "sua-cds" in probe or "qualita" in probe or "qualità" in probe:
+        return "qualita_statistiche"
+    if "/dipartimento/" in url:
+        return "dipartimento"
+    return "generale"
+
+
+def is_study_plan_record(record: dict, section_heading: str, text: str) -> bool:
+    metadata_probe = " ".join(
+        metadata_text(record.get(key)).lower()
+        for key in [
+            "url",
+            "document_url",
+            "discovered_from",
+            "link_text",
+            "title",
+            "breadcrumb",
+        ]
+    )
+    section_probe = section_heading.lower()
+    body_probe = text[:2200].lower()
+
+    if any(
+        marker in metadata_probe
+        for marker in [
+            "__piano-studi-cds",
+            "/didattica/piano-di-studi",
+            "piano di studi a.a",
+            "piano degli studi a.a",
+            "manifesto degli studi",
+        ]
+    ):
+        return True
+
+    title_or_section_probe = f"{metadata_probe}\n{section_probe}"
+    has_plan_title = any(
+        marker in title_or_section_probe
+        for marker in [
+            "piano di studi",
+            "piano degli studi",
+            "manifesto degli studi",
+        ]
+    )
+    has_curricular_table_signal = bool(
+        re.search(r"\b[123]\s*[°o]\s+anno\b", body_probe)
+        or re.search(r"\b(?:ssd|cfu|taf|ambito|curriculum)\b", body_probe)
+    )
+
+    return has_plan_title and has_curricular_table_signal
+
+
+def update_study_plan_context(
+    context: dict[str, object],
+    record: dict,
+    section: str,
+    section_heading: str,
+) -> dict[str, object]:
+    """
+    Propaga il contesto logico dei piani di studio ai chunk figli.
+
+    Le pagine CourseCatalogue hanno spesso questa forma:
+    ## Piano di studi
+    ## Percorso: SOFTWARE - COORTE 2025
+    ### 1 anno
+    ### 2 anno
+
+    Senza ereditarietà, i chunk "2 anno" e "3 anno" vengono classificati come
+    testo generico e il retrieval perde proprio le risposte multi-anno.
+    """
+    heading = clean_heading_text(section_heading)
+    heading_lower = heading.lower()
+    level = markdown_heading_level_from_section(section)
+    current = dict(context)
+
+    if is_course_catalogue_record(record):
+        if "piano di studi" in heading_lower or "piano degli studi" in heading_lower:
+            current["inside_study_plan"] = True
+            current["study_plan_parent_heading"] = heading or "Piano di studi"
+            current.pop("curriculum", None)
+            current.pop("course_year", None)
+
+        curriculum, cohort = parse_curriculum_and_cohort(heading)
+        if curriculum:
+            current["inside_study_plan"] = True
+            current["curriculum"] = curriculum
+            if cohort:
+                current["cohort"] = cohort
+
+        course_year = parse_course_year(heading)
+        if course_year:
+            current["inside_study_plan"] = True
+            current["course_year"] = course_year
+
+        if (
+            level in {1, 2}
+            and heading
+            and not any(marker in heading_lower for marker in ["piano di studi", "piano degli studi", "percorso:"])
+            and not parse_course_year(heading)
+        ):
+            current.pop("inside_study_plan", None)
+            current.pop("study_plan_parent_heading", None)
+            current.pop("curriculum", None)
+            current.pop("course_year", None)
+
+    return current
+
+
+def study_plan_metadata_from_context(
+    context: dict[str, object],
+    record: dict,
+    section_heading: str,
+    chunk_body: str,
+    document_content_title: str,
+) -> dict[str, object]:
+    chunk_is_study_plan = bool(context.get("inside_study_plan")) or is_study_plan_record(
+        record,
+        section_heading,
+        chunk_body,
+    )
+
+    if not chunk_is_study_plan:
+        return {}
+
+    metadata: dict[str, object] = {
+        "course_name": course_name_from_record(record, document_content_title),
+        "course_level": infer_course_level(record, chunk_body),
+        "academic_year": parse_academic_year(record),
+        "study_plan_parent_heading": context.get("study_plan_parent_heading") or "Piano di studi",
+        "curriculum": context.get("curriculum") or "",
+        "cohort": context.get("cohort") or "",
+        "course_year": context.get("course_year") or parse_course_year(f"{section_heading}\n{chunk_body[:300]}"),
+    }
+
+    return compact_dict(metadata)
+
+
+def is_course_syllabus_section(record: dict, section_heading: str, text: str) -> bool:
+    if not is_course_catalogue_record(record):
+        return False
+
+    probe = f"{section_heading}\n{text[:1800]}".lower()
+    return any(
+        marker in probe
+        for marker in [
+            "obiettivi formativi",
+            "contenuti",
+            "metodi didattici",
+            "verifica dell'apprendimento",
+            "testi",
+            "modalita esame",
+            "modalità esame",
+            "ssd:",
+        ]
+    )
+
+
 def is_lab_or_structure_record(record: dict) -> bool:
     url = str(record.get("url") or record.get("document_url") or "").lower()
     return "/ricerca/laboratori" in url or "/dipartimento/strutture" in url
@@ -409,6 +660,10 @@ def classify_chunk_kind(
         return "lab_equipment"
     if document_type == "almalaurea" or "almalaurea" in probe:
         return "course_statistic"
+    if is_study_plan_record(record, section_heading, chunk_body):
+        return "study_plan"
+    if is_course_syllabus_section(record, section_heading, chunk_body):
+        return "course_syllabus"
     if document_type in {"bando", "regolamento", "calendario"}:
         return "official_document"
     if "docenti.unisa.it" in url and "/ricerca/pubblicazioni" in url:
@@ -482,6 +737,44 @@ def build_context_header(
     lines.extend(["", "[CONTENUTO]"])
 
     return "\n".join(lines) + "\n"
+
+
+def build_locator_text(metadata: dict[str, object]) -> str:
+    """
+    Rappresentazione compatta per il retrieval di tipo "locator".
+
+    Non sostituisce il body embedding: è un secondo segnale, corto e fielded,
+    utile per trovare il documento giusto quando la query nomina corso, docente,
+    anno, curriculum, fonte o tipo di informazione.
+    """
+    fields = [
+        ("fonte", metadata.get("source_family")),
+        ("topic", metadata.get("topic_family")),
+        ("tipo_chunk", metadata.get("chunk_kind")),
+        ("titolo", metadata.get("title")),
+        ("titolo_contenuto", metadata.get("content_title")),
+        ("sezione", metadata.get("section_heading")),
+        ("corso", metadata.get("course_name") or metadata.get("entity_name")),
+        ("livello", metadata.get("course_level")),
+        ("curriculum", metadata.get("curriculum")),
+        ("anno_corso", metadata.get("course_year")),
+        ("anno_accademico", metadata.get("academic_year")),
+        ("coorte", metadata.get("cohort")),
+        ("docente", metadata.get("entity_name") if metadata.get("entity_type") == "teacher" else ""),
+        ("docente_id", metadata.get("teacher_id")),
+        ("laboratorio", metadata.get("entity_name") if metadata.get("entity_type") == "lab" else ""),
+        ("tipo_documento", metadata.get("document_type")),
+        ("anni_documento", metadata.get("document_years")),
+        ("breadcrumb", metadata.get("breadcrumb_text")),
+        ("url", metadata.get("source_url") or metadata.get("document_url")),
+    ]
+
+    parts = [
+        f"{name}={metadata_text(value)}"
+        for name, value in fields
+        if metadata_text(value)
+    ]
+    return "; ".join(parts)
 
 
 def split_by_markdown_sections(text: str) -> list[str]:
@@ -646,22 +939,41 @@ def merge_small_chunks(chunks: list[str], min_chars: int, max_chars: int) -> lis
     return [max(merged, key=len)] if merged else []
 
 
+def compatible_chunk_metadata_for_merge(
+    left: dict[str, object],
+    right: dict[str, object],
+) -> bool:
+    """
+    Evita di fondere sezioni che rappresentano anni/curricula diversi.
+    Il merge dei chunk piccoli è utile, ma non deve collassare 1/2/3 anno
+    in un solo chunk indistinguibile.
+    """
+    protected_keys = ("course_year", "curriculum", "cohort")
+    for key in protected_keys:
+        left_value = left.get(key)
+        right_value = right.get(key)
+        if left_value and right_value and left_value != right_value:
+            return False
+    return True
+
+
 def merge_small_chunk_records(
-    chunks: list[tuple[str, str]],
+    chunks: list[tuple[str, str, dict[str, object]]],
     min_chars: int,
     max_chars: int,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, dict[str, object]]]:
     """
     Versione di merge_small_chunks che preserva l'heading della sezione.
     """
     if not chunks:
         return []
 
-    merged: list[tuple[str, str]] = []
+    merged: list[tuple[str, str, dict[str, object]]] = []
     buffer = ""
     buffer_heading = ""
+    buffer_metadata: dict[str, object] = {}
 
-    for chunk, heading in chunks:
+    for chunk, heading, metadata in chunks:
         chunk = chunk.strip()
 
         if not chunk:
@@ -670,26 +982,37 @@ def merge_small_chunk_records(
         if not buffer:
             buffer = chunk
             buffer_heading = heading
+            buffer_metadata = dict(metadata)
             continue
 
         candidate = buffer + "\n\n" + chunk
 
-        if len(buffer) < min_chars and len(candidate) <= max_chars:
+        if (
+            len(buffer) < min_chars
+            and len(candidate) <= max_chars
+            and compatible_chunk_metadata_for_merge(buffer_metadata, metadata)
+        ):
             buffer = candidate
             if not buffer_heading:
                 buffer_heading = heading
+            buffer_metadata = {**dict(metadata), **buffer_metadata}
         else:
-            merged.append((buffer.strip(), buffer_heading))
+            merged.append((buffer.strip(), buffer_heading, buffer_metadata))
             buffer = chunk
             buffer_heading = heading
+            buffer_metadata = dict(metadata)
 
     if buffer:
-        merged.append((buffer.strip(), buffer_heading))
+        merged.append((buffer.strip(), buffer_heading, buffer_metadata))
 
     good_chunks = [
         item
         for item in merged
-        if len(item[0]) >= min_chars or is_protected_small_chunk(item[0], item[1])
+        if (
+            len(item[0]) >= min_chars
+            or is_protected_small_chunk(item[0], item[1])
+            or bool(item[2].get("inside_study_plan"))
+        )
     ]
 
     if good_chunks:
@@ -1071,16 +1394,24 @@ def chunk_document(record: dict) -> list[dict]:
 
     sections = split_by_markdown_sections(text)
 
-    preliminary_chunks: list[tuple[str, str]] = []
+    preliminary_chunks: list[tuple[str, str, dict[str, object]]] = []
+    study_plan_context: dict[str, object] = {}
 
     for section in sections:
         section_heading = markdown_heading_from_section(section)
+        study_plan_context = update_study_plan_context(
+            study_plan_context,
+            record,
+            section,
+            section_heading,
+        )
+        section_metadata = dict(study_plan_context)
 
         if len(section) <= chunk_size:
-            preliminary_chunks.append((section, section_heading))
+            preliminary_chunks.append((section, section_heading, section_metadata))
         else:
             preliminary_chunks.extend(
-                (chunk, section_heading)
+                (chunk, section_heading, section_metadata)
                 for chunk in split_long_text(
                     text=section,
                     chunk_size=chunk_size,
@@ -1106,10 +1437,26 @@ def chunk_document(record: dict) -> list[dict]:
         {
             "body": chunk_body,
             "section_heading": section_heading,
-            "chunk_kind": classify_chunk_kind(chunk_body, section_heading, record),
-            "extra_metadata": {},
+            "chunk_kind": (
+                "study_plan"
+                if study_plan_metadata_from_context(
+                    section_context,
+                    record,
+                    section_heading,
+                    chunk_body,
+                    document_content_title,
+                )
+                else classify_chunk_kind(chunk_body, section_heading, record)
+            ),
+            "extra_metadata": study_plan_metadata_from_context(
+                section_context,
+                record,
+                section_heading,
+                chunk_body,
+                document_content_title,
+            ),
         }
-        for chunk_body, section_heading in merged_chunks
+        for chunk_body, section_heading, section_context in merged_chunks
     ]
     chunk_specs.extend(synthetic_chunk_specs(record, text, sections))
 
@@ -1126,7 +1473,8 @@ def chunk_document(record: dict) -> list[dict]:
             document_content_title=document_content_title,
             section_heading=section_heading,
         )
-        final_text = context_header + chunk_body.strip()
+        chunk_body_clean = chunk_body.strip()
+        final_text = context_header + chunk_body_clean
         text_hash = content_hash(final_text)
 
         chunk_id = make_chunk_id(document_hash, index, final_text)
@@ -1144,12 +1492,14 @@ def chunk_document(record: dict) -> list[dict]:
                 "link_text": record.get("link_text"),
                 "pdf_source_section": record.get("pdf_source_section"),
                 "chunk_kind": chunk_kind,
+                "topic_family": topic_family_from_record(record, chunk_kind, chunk_body_clean),
                 **entity_metadata,
                 "document_years": record_years,
                 "document_type": document_type,
                 **extra_metadata,
             }
         )
+        locator_text = build_locator_text(retrieval_metadata)
         provenance = compact_dict(
             {
                 "index_markdown_path": record.get("index_markdown_path"),
@@ -1176,6 +1526,10 @@ def chunk_document(record: dict) -> list[dict]:
             "provenance": provenance,
             "debug": debug,
             "text": final_text,
+            "body_text": chunk_body_clean,
+            "locator_text": locator_text,
+            "text_for_embedding": chunk_body_clean,
+            "text_for_display": final_text,
             "text_hash": text_hash,
             "chars": len(final_text),
         }

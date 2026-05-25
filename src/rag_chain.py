@@ -16,18 +16,18 @@ from chunk_metadata import flatten_chunk_metadata
 from pipeline_io import BASE_DIR
 
 
-load_dotenv(BASE_DIR / ".env", override=True)
+load_dotenv(BASE_DIR / ".env", override=False)
 
 
-from retrieval import RetrievalResult, hybrid_retrieve
+from retrieval import RetrievalResult, get_last_retrieval_trace, hybrid_retrieve
 from pipeline_io import load_jsonl
 from vector_store import CHUNKS_FILE
 
 
 DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
 
-DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "7"))
-DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "9000"))
+DEFAULT_FINAL_K = int(os.getenv("RAG_FINAL_K", "10"))
+DEFAULT_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "12000"))
 
 GROQ_TIMEOUT_SECONDS = int(os.getenv("GROQ_TIMEOUT_SECONDS", "60"))
 GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
@@ -70,6 +70,9 @@ class RagResponse:
     answer: str
     sources: list[Source]
     retrieved_chunks: list[RetrievalResult]
+    # Trace opzionale del retrieval: utile in debug/valutazione per capire
+    # planner, candidate counts e fonti scartate senza mostrarlo all'utente.
+    trace: dict[str, Any] | None = None
 
 
 def metadata_to_string(value: Any) -> str:
@@ -239,29 +242,24 @@ def build_context(
 ) -> str:
     """
     Costruisce il contesto da passare all'LLM.
-    Limita la lunghezza complessiva per non appesantire modelli piccoli.
+
+    Usa text_for_display che contiene già il context header con titolo, URL,
+    percorso e contenuto. Evita duplicazioni aggiungendo solo un separatore.
     """
     blocks: list[str] = []
     current_chars = 0
 
     for index, result in enumerate(results, start=1):
-        source = get_source_from_result(result)
-
-        header = (
-            f"[DOCUMENTO {index}]\n"
-            f"Titolo: {source.title}\n"
-            f"URL: {source.url}\n"
-            f"Percorso: {source.breadcrumb}\n"
-            f"Chunk ID: {source.chunk_id}\n"
-            f"Contenuto:\n"
-        )
-
+        # Usa text_for_display che contiene già tutte le informazioni
+        text_for_display = result.text
+        
+        header = f"[DOCUMENTO {index}]\n"
         remaining_chars = max_context_chars - current_chars - len(header)
 
         if remaining_chars <= 300:
             break
 
-        content = truncate_text(result.text, remaining_chars)
+        content = truncate_text(text_for_display, remaining_chars)
         block = header + content
 
         blocks.append(block)
@@ -1847,21 +1845,77 @@ def build_direct_office_hours_answer(
     return "\n".join(lines)
 
 
+def estimate_query_complexity(question: str) -> str:
+    """
+    Stima la complessità della query basandosi su lunghezza e struttura.
+    
+    Returns:
+        'simple', 'medium', o 'complex'
+    """
+    words = question.split()
+    num_words = len(words)
+    question_lower = question.lower()
+    
+    # Indicatori di complessità
+    comparison_keywords = ['confronta', 'differenza', 'vs', 'versus', 'rispetto a', 'paragone']
+    list_keywords = ['tutti', 'elenco', 'lista', 'elenca', 'quali sono']
+    boolean_keywords = [' e ', ' o ', ' oppure ', ' ma ', 'non']
+    
+    has_comparison = any(kw in question_lower for kw in comparison_keywords)
+    has_list = any(kw in question_lower for kw in list_keywords)
+    has_boolean = any(kw in question_lower for kw in boolean_keywords)
+    
+    # Logica di classificazione
+    if num_words > 15 or has_comparison or (has_list and has_boolean):
+        return 'complex'
+    elif num_words >= 8 or has_list or has_boolean:
+        return 'medium'
+    else:
+        return 'simple'
+
+
+def get_dynamic_context_params(complexity: str) -> tuple[int, int]:
+    """
+    Restituisce i parametri ottimali per il contesto in base alla complessità.
+    
+    Args:
+        complexity: 'simple', 'medium', o 'complex'
+    
+    Returns:
+        (final_k, max_context_chars)
+    """
+    params = {
+        'simple': (5, 6000),
+        'medium': (10, 12000),
+        'complex': (14, 16000),
+    }
+    return params.get(complexity, (DEFAULT_FINAL_K, DEFAULT_MAX_CONTEXT_CHARS))
+
+
 def answer_question(
     question: str,
     final_k: int = DEFAULT_FINAL_K,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
     model: str = DEFAULT_GROQ_MODEL,
     conversation_history: list[ConversationTurn] | None = None,
+    use_dynamic_context: bool = True,
 ) -> RagResponse:
     """
     Pipeline RAG completa:
     domanda -> retrieval ibrido -> eventuale filtro/estrazione -> LLM -> risposta + fonti.
+    
+    Se use_dynamic_context=True, adatta automaticamente final_k e max_context_chars
+    in base alla complessità della query.
     """
     question = question.strip()
 
     if not question:
         raise ValueError("La domanda non può essere vuota.")
+
+    # Applica contesto dinamico se abilitato e se i parametri sono ai valori di default
+    if use_dynamic_context and final_k == DEFAULT_FINAL_K and max_context_chars == DEFAULT_MAX_CONTEXT_CHARS:
+        complexity = estimate_query_complexity(question)
+        final_k, max_context_chars = get_dynamic_context_params(complexity)
 
     retrieval_question = build_retrieval_question(
         question=question,
@@ -1898,103 +1952,13 @@ def answer_question(
             retrieved_chunks=[],
         )
 
-    if is_specific_office_hours_query(retrieval_question):
-        profile_chunks, personnel_result = retrieve_teacher_office_hours(retrieval_question)
-
-        if profile_chunks:
-            direct_answer = build_direct_office_hours_answer(
-                question=retrieval_question,
-                results=profile_chunks,
-            )
-
-            if direct_answer:
-                return RagResponse(
-                    question=question,
-                    answer=f"{direct_answer} [1]",
-                    sources=build_sources(profile_chunks),
-                    retrieved_chunks=profile_chunks,
-                )
-
-            return RagResponse(
-                question=question,
-                answer=(
-                    "Ho trovato la pagina del docente, ma non sono riuscito a estrarre "
-                    "automaticamente gli orari di ricevimento dal testo indicizzato."
-                ),
-                sources=build_sources(profile_chunks),
-                retrieved_chunks=profile_chunks,
-            )
-
-        if personnel_result:
-            return RagResponse(
-                question=question,
-                answer=(
-                    "Ho trovato il docente nell'elenco del personale DIEM, ma non ho trovato "
-                    "nelle fonti indicizzate una pagina personale con gli orari di ricevimento."
-                ),
-                sources=build_sources([personnel_result]),
-                retrieved_chunks=[personnel_result],
-            )
-
-        return RagResponse(
-            question=question,
-            answer="Non ho trovato questo docente nelle fonti DIEM indicizzate.",
-            sources=[],
-            retrieved_chunks=[],
-        )
-        
-    if is_publications_query(retrieval_question):
-        publications = find_teacher_publications(retrieval_question, limit=5)
-
-        if publications:
-            source_url = publications[0]["url"]
-            source_title = publications[0]["source_title"] or "Pubblicazioni docente"
-
-            lines = [
-                "Le pubblicazioni più recenti trovate nelle fonti indicizzate sono:"
-            ]
-
-            for pub in publications:
-                lines.append(f"- {pub['year']} — {pub['title']} [1]")
-
-            answer = "\n".join(lines)
-
-            return RagResponse(
-                question=question,
-                answer=answer,
-                sources=[
-                    Source(
-                        title=source_title,
-                        url=clean_display_url(source_url),
-                        breadcrumb="",
-                        chunk_id="",
-                    )
-                ],
-                retrieved_chunks=[],
-            )
-
-    if is_teacher_publications_query(retrieval_question):
-        publication_chunks = find_teacher_publication_summaries(
-            retrieval_question,
-            limit=max(final_k, 7),
-        )
-        direct_publications_answer = build_direct_publications_answer(
-            question=retrieval_question,
-            results=publication_chunks,
-        )
-
-        if direct_publications_answer:
-            return RagResponse(
-                question=question,
-                answer=direct_publications_answer,
-                sources=build_sources(publication_chunks),
-                retrieved_chunks=publication_chunks,
-            )
-
     retrieved_chunks = hybrid_retrieve(
         query=retrieval_question,
         final_k=final_k,
     )
+    # Salviamo il trace immediatamente dopo hybrid_retrieve: i passi successivi
+    # possono filtrare o sintetizzare, ma il debug deve descrivere il retrieval.
+    retrieval_trace = get_last_retrieval_trace()
 
     retrieved_chunks = filter_chunks_for_generation(
         question=retrieval_question,
@@ -2007,6 +1971,7 @@ def answer_question(
             answer="Non ho trovato informazioni pertinenti nelle fonti DIEM indicizzate.",
             sources=[],
             retrieved_chunks=[],
+            trace=retrieval_trace,
         )
 
     # Per gli orari di ricevimento è più sicuro estrarre direttamente la tabella
@@ -2024,6 +1989,24 @@ def answer_question(
             answer=direct_answer,
             sources=sources,
             retrieved_chunks=retrieved_chunks,
+            trace=retrieval_trace,
+        )
+
+    # Le risposte estrattive restano post-processing sulle evidenze recuperate:
+    # non bypassano più il retrieval principale, quindi se falliscono si passa
+    # comunque alla generazione con contesto.
+    direct_publications_answer = build_direct_publications_answer(
+        question=retrieval_question,
+        results=retrieved_chunks,
+    )
+
+    if direct_publications_answer:
+        return RagResponse(
+            question=question,
+            answer=direct_publications_answer,
+            sources=build_sources(retrieved_chunks),
+            retrieved_chunks=retrieved_chunks,
+            trace=retrieval_trace,
         )
         
     # Se la domanda riguarda l'orario di ricevimento di un docente specifico
@@ -2040,6 +2023,7 @@ def answer_question(
             ),
             sources=sources,
             retrieved_chunks=retrieved_chunks,
+            trace=retrieval_trace,
         )
 
     context = build_context(
@@ -2112,6 +2096,7 @@ def answer_question(
         answer=clean_answer,
         sources=used_sources,
         retrieved_chunks=retrieved_chunks,
+        trace=retrieval_trace,
     )
 
 

@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from chunk_metadata import flatten_chunk_metadata  # noqa: E402
 from chunking import (  # noqa: E402
     build_context_header,
+    classify_chunk_kind,
     chunk_document,
     infer_document_type,
     years_from_record,
@@ -52,6 +53,107 @@ class ChunkingContextTests(unittest.TestCase):
         self.assertIn("Anni documento: 2024", header)
         self.assertEqual(infer_document_type(record), "almalaurea")
         self.assertEqual(years_from_record(record), [2024])
+
+    def test_classify_course_catalogue_syllabus_chunk(self) -> None:
+        record = {
+            "url": "https://unisa.coursecatalogue.cineca.it/corsi/2025/500854/insegnamenti/2025/521541/2025/10000",
+            "title": "MACHINE LEARNING",
+        }
+
+        chunk_kind = classify_chunk_kind(
+            "## Contenuti\nUNITÀ DIDATTICA 1: concetti fondamentali.",
+            "Contenuti",
+            record,
+        )
+
+        self.assertEqual(chunk_kind, "course_syllabus")
+
+    def test_classify_study_plan_pdf_chunk(self) -> None:
+        record = {
+            "source": "pdf",
+            "url": "https://corsi.unisa.it/uploads/rescue/__piano-studi-cds/2025/IE127.pdf",
+            "title": "Piano degli studi",
+        }
+
+        chunk_kind = classify_chunk_kind(
+            "CORSO DI LAUREA IN INGEGNERIA INFORMATICA L-8\n1° ANNO\nAnalisi Matematica I",
+            "1° ANNO - 2025/26",
+            record,
+        )
+
+        self.assertEqual(chunk_kind, "study_plan")
+
+    def test_course_catalogue_study_plan_children_inherit_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            markdown_path = Path(temp_dir) / "catalogue.md"
+            markdown_path.write_text(
+                "# INGEGNERIA INFORMATICA\n\n"
+                "## Piano di studi\n\n"
+                "## Percorso: SOFTWARE - COORTE 2025\n\n"
+                "### 1 anno\n\n"
+                "| Insegnamento | CFU |\n"
+                "| --- | --- |\n"
+                "| Analisi Matematica 1 | 9 |\n\n"
+                "### 2 anno\n\n"
+                "| Insegnamento | CFU |\n"
+                "| --- | --- |\n"
+                "| Algoritmi e Strutture Dati | 9 |\n\n"
+                "### 3 anno\n\n"
+                "| Insegnamento | CFU |\n"
+                "| --- | --- |\n"
+                "| Ingegneria del Software | 9 |\n",
+                encoding="utf-8",
+            )
+
+            record = {
+                "hash": "course123",
+                "content_hash": "content_course",
+                "source": "course_catalogue",
+                "url": "https://unisa.coursecatalogue.cineca.it/corsi/2025/500853?annoOrdinamento=2025",
+                "title": "INGEGNERIA INFORMATICA",
+                "breadcrumb": ["Offerta formativa", "INGEGNERIA INFORMATICA"],
+                "index_markdown_path": str(markdown_path.relative_to(ROOT)),
+                "last_crawled": "2026-05-23T00:00:00+00:00",
+                "clean_status": "ok",
+            }
+
+            chunks = chunk_document(record)
+
+        study_chunks = [
+            chunk
+            for chunk in chunks
+            if chunk["retrieval_metadata"].get("chunk_kind") == "study_plan"
+        ]
+
+        self.assertGreaterEqual(len(study_chunks), 3)
+        years = {
+            chunk["retrieval_metadata"].get("course_year")
+            for chunk in study_chunks
+        }
+        self.assertTrue({1, 2, 3}.issubset(years))
+        for chunk in study_chunks:
+            metadata = chunk["retrieval_metadata"]
+            self.assertEqual(metadata["course_name"], "INGEGNERIA INFORMATICA")
+            self.assertEqual(metadata["curriculum"], "SOFTWARE")
+            self.assertEqual(metadata["cohort"], 2025)
+            self.assertIn("locator_text", chunk)
+            self.assertNotIn("[CONTESTO DOCUMENTO]", chunk["body_text"])
+
+    def test_tutorato_page_is_not_classified_as_study_plan(self) -> None:
+        record = {
+            "source": "html",
+            "url": "https://corsi.unisa.it/ingegneria-informatica/attivita-e-servizi/tutorato",
+            "title": "Ingegneria Informatica | Orientamento e Tutorato in Itinere",
+            "breadcrumb": ["Ingegneria Informatica", "Attività e Servizi", "Orientamento e Tutorato in Itinere"],
+        }
+
+        chunk_kind = classify_chunk_kind(
+            "assistenza alla elaborazione del piano di studio e alla scelta della tesi",
+            "Ingegneria Informatica Orientamento e Tutorato in Itinere",
+            record,
+        )
+
+        self.assertNotEqual(chunk_kind, "study_plan")
 
     def test_chunk_document_separates_metadata_levels(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:

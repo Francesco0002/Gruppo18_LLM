@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+"""
+Schema centrale dei metadata dei chunk.
+
+Tutti gli strati della pipeline leggono questi campi tramite flatten_chunk_metadata:
+chunking li scrive in sezioni, Chroma li richiede piatti e retrieval/reranking
+li usano per source tracing, filtri e citazioni.
+"""
+
 from typing import Any
 
 
-CHUNK_METADATA_SCHEMA_VERSION = 2
+# Incrementare questa versione forza il rebuild del vector store quando cambia
+# il contratto metadata, evitando query su collection costruite con campi vecchi.
+CHUNK_METADATA_SCHEMA_VERSION = 4
 
 CORE_METADATA_KEYS = [
     "chunk_id",
@@ -28,11 +38,24 @@ RETRIEVAL_METADATA_KEYS = [
     "link_text",
     "pdf_source_section",
     "chunk_kind",
+    # Macro-area del contenuto: serve per audit e retrieval topic-aware senza
+    # introdurre intent regex rigidi.
+    "topic_family",
     "entity_type",
     "entity_name",
     "source_family",
     "teacher_id",
     "course_id",
+    # Campi didattici ereditati dai piani di studio CourseCatalogue/PDF.
+    # Permettono query tipo "secondo anno curriculum Software" senza inserire
+    # header lunghi nel testo usato per embedding.
+    "course_name",
+    "course_level",
+    "curriculum",
+    "course_year",
+    "study_plan_parent_heading",
+    "academic_year",
+    "cohort",
     "lab_id",
     "year",
     "document_years",
