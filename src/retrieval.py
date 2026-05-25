@@ -23,7 +23,7 @@ from rank_bm25 import BM25Okapi
 
 from chunk_metadata import flatten_chunk_metadata
 from pipeline_io import load_jsonl
-from query_planner import QueryPlan, plan_query
+from query_planner import QueryPlan, build_retrieval_query, plan_query
 from reranking import neural_rerank
 from structured_evidence import structured_retrieve
 from vector_store import CHUNKS_FILE, dense_locator_retrieve, dense_retrieve, preview_text
@@ -436,6 +436,7 @@ def hybrid_retrieve(
     # Il planner orienta la ricerca ma non blocca mai BM25/dense. In caso di
     # bassa confidenza il risultato resta una fusione ampia.
     query_plan = plan_query(query)
+    retrieval_query = build_retrieval_query(query, query_plan)
     if max_per_url == 2 and (
         query_plan.requires_complete_answer
         or query_plan.task_type in {"study_plan", "course_catalog", "teacher_publications"}
@@ -444,10 +445,10 @@ def hybrid_retrieve(
 
     # Candidate generation multi-representation.
     result_lists = {
-        "bm25": bm25_retrieve(query, k=bm25_k),
-        "dense": dense_retrieve_wrapped(query, k=dense_k),
-        "locator_dense": dense_locator_retrieve_wrapped(query, k=max(20, min(dense_k, 60))),
-        "structured": structured_retrieve_wrapped(query, query_plan, k=max(20, final_k * 4)),
+        "bm25": bm25_retrieve(retrieval_query, k=bm25_k),
+        "dense": dense_retrieve_wrapped(retrieval_query, k=dense_k),
+        "locator_dense": dense_locator_retrieve_wrapped(retrieval_query, k=max(20, min(dense_k, 60))),
+        "structured": structured_retrieve_wrapped(retrieval_query, query_plan, k=max(20, final_k * 4)),
     }
     result_lists = {
         name: results
@@ -494,6 +495,7 @@ def hybrid_retrieve(
     # una certa evidenza è arrivata nel top-k.
     _LAST_RETRIEVAL_TRACE = {
         "query": query,
+        "retrieval_query": retrieval_query,
         "plan": {
             "task_type": query_plan.task_type,
             "confidence": query_plan.confidence,

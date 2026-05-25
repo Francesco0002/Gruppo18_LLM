@@ -245,7 +245,7 @@ def pick_embedding_device() -> str:
     """
     Sceglie il device per gli embedding.
 
-    Su Mac M1 con 8 GB, Qwen3 su MPS può saturare la memoria condivisa durante
+    Con backend ONNX usiamo sempre CPU, perché è il percorso più veloce per
     l'indicizzazione. In quel caso impostare EMBEDDING_DEVICE=cpu nel .env.
     """
     if EMBEDDING_BACKEND == "onnx":

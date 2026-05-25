@@ -1464,8 +1464,55 @@ def build_direct_publications_answer(
     if not is_teacher_publications_query(question) or not results:
         return None
 
-    first_metadata = results[0].metadata or {}
-    first_source = get_source_from_result(results[0])
+    teacher_tokens = teacher_tokens_from_question(question)
+    candidate_results = results
+
+    if teacher_tokens:
+        matched_results: list[RetrievalResult] = []
+
+        for result in results:
+            metadata = result.metadata or {}
+            metadata_text = " ".join(
+                metadata_to_string(metadata.get(key))
+                for key in [
+                    "title",
+                    "breadcrumb",
+                    "breadcrumb_text",
+                    "entity_name",
+                    "source_url",
+                    "document_url",
+                    "publication_title",
+                ]
+            ).lower()
+            metadata_tokens = simple_tokenize(metadata_text)
+
+            if teacher_metadata_matches(teacher_tokens, metadata_tokens):
+                matched_results.append(result)
+
+        if not matched_results:
+            return None
+
+        # Preferiamo le schede di pubblicazione strutturate tra i risultati recuperati
+        # (contengono metadati espliciti come anno e ordine). L'accesso non deterministico
+        # all'intero corpus durante i test unitari può produrre corrispondenze inattese,
+        # quindi cerchiamo prima i `publication_summary` nei risultati forniti dal retrieval
+        # e li usiamo se presenti.
+        pub_summaries_local = [
+            r for r in matched_results if (r.metadata or {}).get("chunk_kind") == "publication_summary"
+        ]
+
+        if pub_summaries_local:
+            candidate_results = pub_summaries_local
+        else:
+            # Fallback: se non abbiamo summaries fra i risultati passati,
+            # proviamo a cercare nel corpus strutturato come ultima risorsa.
+            pub_summaries = find_teacher_publication_summaries(
+                question, limit=len(matched_results) or 7
+            )
+            candidate_results = pub_summaries if pub_summaries else matched_results
+
+    first_metadata = candidate_results[0].metadata or {}
+    first_source = get_source_from_result(candidate_results[0])
     teacher_name = (
         metadata_to_string(first_metadata.get("entity_name")).strip()
         or first_source.title.split("|", 1)[0].strip()
@@ -1475,7 +1522,7 @@ def build_direct_publications_answer(
     lines = [f"Le pubblicazioni più recenti di {teacher_name} che ho trovato sono:"]
     seen_publication_ids: set[str] = set()
 
-    for result in results:
+    for result in candidate_results:
         metadata = result.metadata or {}
         publication_id = metadata_to_string(metadata.get("publication_id")) or result.chunk_id
         if publication_id in seen_publication_ids:
@@ -1485,7 +1532,10 @@ def build_direct_publications_answer(
         title = metadata_to_string(metadata.get("publication_title")).strip()
         if not title:
             title_match = re.search(r"Titolo pubblicazione:\s*(.+)", result.text)
-            title = title_match.group(1).strip() if title_match else "Titolo non disponibile"
+            title = title_match.group(1).strip() if title_match else ""
+
+        if not title:
+            continue
 
         year = metadata_to_string(metadata.get("publication_year")).strip()
         publication_type = metadata_to_string(metadata.get("publication_type")).strip()
@@ -2004,8 +2054,48 @@ def answer_question(
         return RagResponse(
             question=question,
             answer=direct_publications_answer,
-            sources=build_sources(retrieved_chunks),
-            retrieved_chunks=retrieved_chunks,
+            sources=build_sources([
+                result
+                for result in retrieved_chunks
+                if teacher_metadata_matches(
+                    teacher_tokens_from_question(retrieval_question),
+                    simple_tokenize(
+                        " ".join(
+                            metadata_to_string(result.metadata.get(key))
+                            for key in [
+                                "title",
+                                "breadcrumb",
+                                "breadcrumb_text",
+                                "entity_name",
+                                "source_url",
+                                "document_url",
+                                "publication_title",
+                            ]
+                        ).lower()
+                    ),
+                )
+            ]),
+            retrieved_chunks=[
+                result
+                for result in retrieved_chunks
+                if teacher_metadata_matches(
+                    teacher_tokens_from_question(retrieval_question),
+                    simple_tokenize(
+                        " ".join(
+                            metadata_to_string(result.metadata.get(key))
+                            for key in [
+                                "title",
+                                "breadcrumb",
+                                "breadcrumb_text",
+                                "entity_name",
+                                "source_url",
+                                "document_url",
+                                "publication_title",
+                            ]
+                        ).lower()
+                    ),
+                )
+            ],
             trace=retrieval_trace,
         )
         

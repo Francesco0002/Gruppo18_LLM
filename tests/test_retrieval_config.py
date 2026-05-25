@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import reranking  # noqa: E402
+import query_planner  # noqa: E402
 import vector_store  # noqa: E402
 from reranking import reranker_passage  # noqa: E402
 
@@ -173,6 +174,30 @@ class RetrievalConfigTests(unittest.TestCase):
 
         self.assertIn("anno_corso=2", document.page_content)
         self.assertEqual(document.metadata["vector_representation"], "locator")
+
+    def test_build_retrieval_query_amplifies_teacher_publications_signal(self) -> None:
+        plan = query_planner.plan_query("quali sono le pubblicazioni del prof Antonio Greco")
+
+        retrieval_query = query_planner.build_retrieval_query(
+            "quali sono le pubblicazioni del prof Antonio Greco",
+            plan,
+        )
+
+        self.assertIn("Antonio Greco", retrieval_query)
+        self.assertIn("pubblicazioni docente", retrieval_query)
+
+    def test_build_retrieval_query_adds_exam_terms_for_course_syllabi(self) -> None:
+        plan = query_planner.plan_query(
+            "qual e il programma dell'esame di machine learning della magistrale in ingegneria informatica"
+        )
+
+        retrieval_query = query_planner.build_retrieval_query(
+            "qual e il programma dell'esame di machine learning della magistrale in ingegneria informatica",
+            plan,
+        )
+
+        self.assertIn("verifica dell'apprendimento", retrieval_query)
+        self.assertIn("modalita esame", retrieval_query)
 
 
 if __name__ == "__main__":

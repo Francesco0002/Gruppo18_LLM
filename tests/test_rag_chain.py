@@ -320,6 +320,45 @@ FONTI_USATE: [2, 3]
 
         self.assertEqual(build_retrieval_question(question, history), question)
 
+    def test_build_direct_publications_answer_filters_wrong_teachers(self) -> None:
+        from rag_chain import build_direct_publications_answer
+
+        results = [
+            RetrievalResult(
+                chunk_id="foggia",
+                text="Titolo pubblicazione: Wrong paper",
+                metadata={
+                    "entity_name": "Pasquale FOGGIA",
+                    "title": "Pasquale FOGGIA | Pubblicazioni",
+                    "publication_title": "Wrong paper",
+                },
+                source="hybrid",
+                rank=1,
+                score=1.0,
+            ),
+            RetrievalResult(
+                chunk_id="greco",
+                text="Titolo pubblicazione: Right paper",
+                metadata={
+                    "entity_name": "ANTONIO GRECO",
+                    "title": "ANTONIO GRECO | Pubblicazioni",
+                    "publication_title": "Right paper",
+                },
+                source="hybrid",
+                rank=2,
+                score=0.9,
+            ),
+        ]
+
+        answer = build_direct_publications_answer(
+            "quali sono le pubblicazioni recenti del prof Antonio Greco",
+            results,
+        )
+
+        self.assertIsNotNone(answer)
+        self.assertIn("Right paper", answer)
+        self.assertNotIn("Wrong paper", answer)
+
     def test_build_retrieval_question_uses_history_for_fragment_followup(self) -> None:
         history = [
             {

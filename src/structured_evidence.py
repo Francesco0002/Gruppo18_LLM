@@ -134,14 +134,14 @@ def chunk_task_score(plan: QueryPlan, metadata: dict[str, Any], haystack: str) -
     reasons: list[str] = []
 
     if plan.task_type == "study_plan":
-        if chunk_kind == "study_plan":
+        if chunk_kind in {"study_plan", "course_syllabus"}:
             score += 70
-            reasons.append("study_plan chunk")
+            reasons.append(f"{chunk_kind} chunk")
         elif "coursecatalogue" in haystack and re.search(r"\b[123]\s+anno\b", haystack):
             score += 45
             reasons.append("coursecatalogue year section")
     elif plan.task_type == "course_catalog":
-        if chunk_kind in {"course_info", "study_plan"} or topic_family == "didattica":
+        if chunk_kind in {"course_info", "course_syllabus", "study_plan"} or topic_family == "didattica":
             score += 42
             reasons.append("course evidence")
     elif plan.task_type == "office_hours":

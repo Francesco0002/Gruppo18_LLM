@@ -129,11 +129,75 @@ class QueryPlan:
         return self.confidence < 0.55
 
 
+def build_retrieval_query(query: str, plan: QueryPlan) -> str:
+    """
+    Rafforza la query di retrieval con segnali già emersi dal planner.
+
+    Non cambia l'intento della domanda: aggiunge solo termini utili a BM25,
+    dense retrieval e structured retrieval per evitare che soggetti o syllabus
+    affini prendano il sopravvento.
+    """
+    terms: list[str] = []
+    teacher = str(plan.entities.get("teacher") or "").strip()
+    course = str(plan.entities.get("course") or "").strip()
+    normalized_query = normalize_query(query)
+
+    if teacher:
+        terms.append(teacher)
+        if plan.task_type == "teacher_publications":
+            terms.extend([f"{teacher} pubblicazioni", "pubblicazioni docente"])
+        elif plan.task_type == "teacher_profile":
+            terms.append("profilo docente")
+
+    if course:
+        terms.append(course)
+
+    if plan.task_type == "teacher_publications":
+        terms.extend(["pubblicazioni", "produzione scientifica", "articoli"])
+
+    if plan.task_type in {"study_plan", "course_catalog"} and contains_any(
+        normalized_query,
+        (
+            "programma",
+            "esame",
+            "sillabo",
+            "syllabus",
+            "verifica dell apprendimento",
+            "modalita esame",
+        ),
+    ):
+        terms.extend([
+            "programma esame",
+            "verifica dell'apprendimento",
+            "modalita esame",
+            "contenuti insegnamento",
+        ])
+
+    if plan.task_type == "office_hours" and teacher:
+        terms.append("orario di ricevimento")
+
+    if not terms:
+        return query
+
+    merged_terms: list[str] = []
+    seen: set[str] = set()
+
+    for term in [query, *terms]:
+        cleaned_term = " ".join(str(term).split())
+        normalized_term = normalize_query(cleaned_term)
+        if not cleaned_term or normalized_term in seen:
+            continue
+        seen.add(normalized_term)
+        merged_terms.append(cleaned_term)
+
+    return " ".join(merged_terms)
+
+
 def infer_task_type(text: str) -> tuple[str, float, str]:
     # Heuristiche ad alto segnale: non sono intent esclusivi e non bloccano la
     # pipeline. Il valore di confidence serve solo a capire quanto fidarsi per
     # operazioni come pinning di evidenze strutturate.
-    if contains_any(text, ("piano di studi", "piano degli studi", "esami", "insegnamenti", "cfu", "curriculum")):
+    if contains_any(text, ("piano di studi", "piano degli studi", "esame", "esami", "insegnamenti", "cfu", "curriculum")):
         return "study_plan", 0.78, "query didattica con segnali di piano di studi/insegnamenti"
     if "anno" in text and contains_any(text, ("primo", "secondo", "terzo", "1 anno", "2 anno", "3 anno")) and "ingegneria" in text:
         return "study_plan", 0.76, "query didattica multi-anno su corso di ingegneria"
