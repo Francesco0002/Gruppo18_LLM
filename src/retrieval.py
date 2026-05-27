@@ -395,6 +395,10 @@ def pin_structured_evidence(
 
     if plan.task_type == "study_plan" and plan.requires_complete_answer:
         pin_count = min(final_k, 8, len(structured_results))
+    elif plan.task_type == "teacher_publications":
+        pin_count = min(final_k, 7, len(structured_results))
+    elif plan.task_type == "lab_equipment" and plan.requires_complete_answer:
+        pin_count = min(final_k, 8, len(structured_results))
     elif plan.needs_structured_data:
         pin_count = min(max(2, final_k // 3), len(structured_results))
     else:
@@ -461,13 +465,15 @@ def hybrid_retrieve(
     # locator e structured evidence contribuiscono come ranking indipendenti.
     hybrid_results = reciprocal_rank_fusion(result_lists)
 
-    # Neural reranking per migliorare la precisione
-    neural_pool_k = max(rerank_k, final_k * 4)
-    hybrid_results = neural_rerank(
-        query=query,
-        results=hybrid_results,
-        top_k=neural_pool_k,
-    )
+    # Neural reranking per migliorare la precisione. Se rerank_k <= 0 viene
+    # saltato davvero, utile per debug offline e ambienti senza modello locale.
+    if rerank_k > 0:
+        neural_pool_k = max(rerank_k, final_k * 4)
+        hybrid_results = neural_rerank(
+            query=query,
+            results=hybrid_results,
+            top_k=neural_pool_k,
+        )
     hybrid_results = pin_structured_evidence(
         results=hybrid_results,
         structured_results=result_lists.get("structured", []),

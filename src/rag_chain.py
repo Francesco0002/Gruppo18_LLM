@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -10,7 +11,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from groq import Groq
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from chunk_metadata import flatten_chunk_metadata
 from pipeline_io import BASE_DIR
@@ -37,6 +38,13 @@ GROQ_JSON_MODE = os.getenv("GROQ_JSON_MODE", "true").strip().lower() in {
     "on",
 }
 GROQ_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", "3"))
+GROQ_SDK_MAX_RETRIES = int(os.getenv("GROQ_SDK_MAX_RETRIES", "0"))
+GROQ_MAX_COMPLETION_TOKENS = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "1200"))
+GROQ_REASONING_FORMAT = os.getenv("GROQ_REASONING_FORMAT", "hidden").strip().lower()
+GROQ_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT", "").strip().lower()
+RAG_MIN_CONTEXT_CHARS_ON_PAYLOAD_RETRY = int(
+    os.getenv("RAG_MIN_CONTEXT_CHARS_ON_PAYLOAD_RETRY", "3200")
+)
 CONTEXTUALIZER_MAX_HISTORY_MESSAGES = int(os.getenv("RAG_CONTEXTUALIZER_MAX_HISTORY_MESSAGES", "6"))
 
 MISSING_TITLE_PLACEHOLDERS = {
@@ -73,6 +81,14 @@ class RagResponse:
     # Trace opzionale del retrieval: utile in debug/valutazione per capire
     # planner, candidate counts e fonti scartate senza mostrarlo all'utente.
     trace: dict[str, Any] | None = None
+
+
+class GroqPayloadTooLargeError(RuntimeError):
+    """Errore recuperabile riducendo il contesto della richiesta Groq."""
+
+
+class GroqReasoningOnlyError(RuntimeError):
+    """Errore recuperabile quando il modello restituisce solo reasoning."""
 
 
 def metadata_to_string(value: Any) -> str:
@@ -267,6 +283,337 @@ def build_context(
 
         if current_chars >= max_context_chars:
             break
+
+    return "\n\n---\n\n".join(blocks)
+
+
+COMPACT_CONTEXT_STOPWORDS = {
+    "alla",
+    "allo",
+    "agli",
+    "alle",
+    "anche",
+    "avere",
+    "come",
+    "con",
+    "cosa",
+    "dalla",
+    "dalle",
+    "degli",
+    "della",
+    "delle",
+    "degli",
+    "deve",
+    "devo",
+    "diem",
+    "dove",
+    "essere",
+    "gli",
+    "ingegneria",
+    "nel",
+    "nella",
+    "nelle",
+    "per",
+    "poi",
+    "puoi",
+    "quale",
+    "quali",
+    "quando",
+    "sono",
+    "sul",
+    "sulla",
+    "tra",
+    "una",
+    "uno",
+}
+
+
+FORMULA_SIGNAL_PATTERN = re.compile(
+    r"(?:\b\d+(?:[,.]\d+)?\b|[=*/%+]|[-−–]\s*\d|\b(?:formula|calcolo|media|punteggio|punti|voto|valutazione|centodecimi|crediti)\b)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CompactContextUnit:
+    document_index: int
+    unit_index: int
+    text: str
+    score: float
+
+
+def normalize_relevance_text(text: object) -> str:
+    value = unicodedata.normalize("NFKD", str(text or ""))
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return value.lower()
+
+
+def relevance_tokens(text: object) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-zA-Z0-9_]+", normalize_relevance_text(text))
+        if len(token) > 2 and token not in COMPACT_CONTEXT_STOPWORDS
+    }
+
+
+def split_relevance_units(text: str, max_unit_chars: int = 650) -> list[str]:
+    units: list[str] = []
+
+    for block in re.split(r"\n\s*\n", text):
+        block = block.strip()
+        if not block:
+            continue
+
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) > 1 and any(line.startswith("|") for line in lines):
+            units.extend(lines)
+            continue
+
+        if len(block) <= max_unit_chars:
+            units.append(block)
+            continue
+
+        current_parts: list[str] = []
+        current_chars = 0
+        for sentence in re.split(r"(?<=[.!?;:])\s+", block):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            if current_parts and current_chars + len(sentence) + 1 > max_unit_chars:
+                units.append(" ".join(current_parts))
+                current_parts = []
+                current_chars = 0
+
+            current_parts.append(sentence)
+            current_chars += len(sentence) + 1
+
+        if current_parts:
+            units.append(" ".join(current_parts))
+
+    return units
+STRUCTURED_RELEVANCE_CUES = {
+    "calcolo",
+    "cfu",
+    "crediti",
+    "elenco",
+    "formula",
+    "graduatoria",
+    "lista",
+    "media",
+    "punteggio",
+    "tabella",
+    "tabelle",
+    "voto",
+}
+
+
+def question_prefers_relevance_compaction(question: str) -> bool:
+    normalized_question = normalize_relevance_text(question)
+
+    if FORMULA_SIGNAL_PATTERN.search(normalized_question):
+        return True
+
+    return any(cue in normalized_question for cue in STRUCTURED_RELEVANCE_CUES)
+
+
+def compact_header_for_result(document_index: int, result: RetrievalResult) -> str:
+    metadata = result.metadata or {}
+    url = (
+        metadata_to_string(metadata.get("source_url"))
+        or metadata_to_string(metadata.get("document_url"))
+        or metadata_to_string(metadata.get("url"))
+        or "URL non disponibile"
+    )
+    title = display_title_from_metadata(metadata, url)
+    section = (
+        metadata_to_string(metadata.get("section_heading"))
+        or metadata_to_string(metadata.get("breadcrumb_text"))
+        or ""
+    ).strip()
+    document_type = metadata_to_string(metadata.get("document_type")).strip()
+
+    lines = [
+        f"[DOCUMENTO {document_index}]",
+        f"Titolo: {title}",
+        f"Fonte: {url}",
+    ]
+
+    if section:
+        lines.append(f"Sezione: {section}")
+    if document_type:
+        lines.append(f"Tipo documento: {document_type}")
+
+    lines.append("[ESTRATTI RILEVANTI]")
+    return "\n".join(lines)
+
+
+def score_context_unit(
+    unit: str,
+    query_tokens: set[str],
+    metadata_tokens: set[str],
+    unit_index: int,
+) -> float:
+    unit_tokens = relevance_tokens(unit)
+    overlap = len(query_tokens.intersection(unit_tokens))
+    metadata_overlap = len(metadata_tokens.intersection(unit_tokens))
+    score = float(overlap * 8 + metadata_overlap * 1.5)
+
+    if FORMULA_SIGNAL_PATTERN.search(normalize_relevance_text(unit)):
+        score += 7.0
+
+    if re.search(r"\b\d+(?:[,.]\d+)?\b", unit):
+        score += 3.0
+
+    if any(symbol in unit for symbol in ("=", "*", "/", "%", "≤", "≥", "+")):
+        score += 6.0
+
+    if unit_index <= 1:
+        score += 1.0
+
+    return score
+
+
+def build_relevance_compacted_context(
+    question: str,
+    results: list[RetrievalResult],
+    max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+) -> str:
+    """
+    Riduce il contesto dopo un 413 conservando gli estratti piu utili.
+
+    La selezione resta topic-agnostic: usa overlap lessicale, metadata, numeri
+    e segnali di formula/tabella, cosi i passaggi computabili non spariscono
+    quando il payload deve essere compresso.
+    """
+    if not results:
+        return ""
+
+    query_tokens = relevance_tokens(question)
+    candidates: list[CompactContextUnit] = []
+    units_by_document: dict[int, list[str]] = {}
+    best_score_by_document: dict[int, float] = {}
+
+    for document_index, result in enumerate(results, start=1):
+        metadata = result.metadata or {}
+        metadata_text = " ".join(
+            metadata_to_string(metadata.get(key))
+            for key in [
+                "title",
+                "content_title",
+                "section_heading",
+                "breadcrumb",
+                "breadcrumb_text",
+                "source_url",
+                "document_url",
+                "document_type",
+                "chunk_kind",
+                "topic_family",
+            ]
+        )
+        metadata_tokens = relevance_tokens(metadata_text)
+        units = split_relevance_units(result.text)
+        units_by_document[document_index] = units
+
+        for unit_index, unit in enumerate(units):
+            score = score_context_unit(
+                unit=unit,
+                query_tokens=query_tokens,
+                metadata_tokens=metadata_tokens,
+                unit_index=unit_index,
+            )
+            if score <= 0 and candidates:
+                continue
+            candidates.append(
+                CompactContextUnit(
+                    document_index=document_index,
+                    unit_index=unit_index,
+                    text=unit,
+                    score=score,
+                )
+            )
+            best_score_by_document[document_index] = max(
+                best_score_by_document.get(document_index, 0.0),
+                score,
+            )
+
+    if not candidates:
+        return build_context(results=results, max_context_chars=max_context_chars)
+
+    selected: dict[int, set[int]] = {}
+    selected_unit_count_by_document: dict[int, int] = {}
+    selected_chars = 0
+    unit_char_budget = max(600, int(max_context_chars * 0.78))
+
+    for candidate in sorted(candidates, key=lambda unit: unit.score, reverse=True):
+        if selected_unit_count_by_document.get(candidate.document_index, 0) >= 8:
+            continue
+        if candidate.score < 2.0 and selected:
+            continue
+
+        document_units = units_by_document.get(candidate.document_index, [])
+        candidate_indexes = {
+            index
+            for index in (
+                candidate.unit_index - 1,
+                candidate.unit_index,
+                candidate.unit_index + 1,
+            )
+            if 0 <= index < len(document_units)
+        }
+
+        for unit_index in sorted(candidate_indexes):
+            unit_text = document_units[unit_index]
+            if unit_index in selected.get(candidate.document_index, set()):
+                continue
+            if selected_chars + len(unit_text) > unit_char_budget and selected:
+                continue
+
+            selected.setdefault(candidate.document_index, set()).add(unit_index)
+            selected_unit_count_by_document[candidate.document_index] = len(
+                selected[candidate.document_index]
+            )
+            selected_chars += len(unit_text)
+
+        if selected_chars >= unit_char_budget:
+            break
+
+    if not selected:
+        first = max(candidates, key=lambda unit: unit.score)
+        selected = {first.document_index: {first.unit_index}}
+
+    document_order = sorted(
+        selected,
+        key=lambda index: best_score_by_document.get(index, 0.0),
+        reverse=True,
+    )
+    blocks: list[str] = []
+    current_chars = 0
+
+    for document_index in document_order:
+        result = results[document_index - 1]
+        unit_indexes = sorted(selected[document_index])
+        units = [
+            units_by_document[document_index][unit_index]
+            for unit_index in unit_indexes
+            if unit_index < len(units_by_document[document_index])
+        ]
+        if not units:
+            continue
+
+        block = (
+            compact_header_for_result(document_index, result)
+            + "\n"
+            + "\n\n".join(units)
+        )
+        separator_chars = 7 if blocks else 0
+        remaining_chars = max_context_chars - current_chars - separator_chars
+        if remaining_chars <= 300:
+            break
+
+        block = truncate_text(block, remaining_chars)
+        blocks.append(block)
+        current_chars += len(block) + separator_chars
 
     return "\n\n---\n\n".join(blocks)
 
@@ -543,7 +890,25 @@ Regole:
     domanda invariata.
 - La domanda autonoma deve restare in italiano e deve contenere solo le parole
     necessarie per il retrieval, non una risposta.
-
+- Per domande di follow-up con possessivi, pronomi, deittici o ellissi
+    ("suo", "sua", "questo", "quello", "dove si trova?", "quando scade?",
+    "quali requisiti?", "che strumenti possiede?"), risolvi il riferimento
+    usando il soggetto principale più recente e compatibile nella cronologia.
+    Esempi:
+    - dopo "Qual è l'orario di ricevimento del prof Antonio Greco?",
+        "e il suo studio dove si trova?" diventa
+        "Dove si trova lo studio del prof Antonio Greco?";
+    - dopo "Parlami del corso di Ingegneria Informatica",
+        "quali sono i requisiti?" diventa
+        "Quali sono i requisiti del corso di Ingegneria Informatica?";
+    - dopo "Quali bandi recenti ci sono?",
+        "quando scade?" diventa "Quando scade il bando recente indicato?";
+    - dopo "Che strumenti possiede il LabROB?",
+        "dove si trova?" diventa "Dove si trova il laboratorio LabROB?";
+    - dopo "Che progetti sull'intelligenza artificiale svolge il DIEM?",
+        "quanto dura?" diventa
+        "Quanto dura il progetto sull'intelligenza artificiale del DIEM?".
+        
 Restituisci solo JSON valido:
 {{
     "needs_context": true,
@@ -713,11 +1078,11 @@ def build_conversation_context(
     original_question: str = "",
 ) -> str:
     lines: list[str] = []
-    history = normalize_conversation_history(conversation_history, max_messages=8)
+    history = normalize_conversation_history(conversation_history, max_messages=6)
 
     for turn in history:
         label = "Utente" if turn["role"] == "user" else "Assistente"
-        content = truncate_text(turn["content"], 700)
+        content = truncate_text(turn["content"], 450)
         lines.append(f"{label}: {content}")
 
     if retrieval_question and retrieval_question != original_question:
@@ -761,6 +1126,12 @@ Se nel contesto sono presenti sia informazioni correnti sia informazioni di anni
 Se il contesto non contiene informazioni sufficienti, rispondi chiaramente:
 "Non ho trovato questa informazione nelle fonti DIEM indicizzate."
 
+Se la domanda richiede un calcolo, una stima o un valore derivato e nel contesto
+sono presenti formule, vincoli numerici o tabelle di punteggio pertinenti,
+applicali ai valori forniti dall'utente. Se mancano fattori variabili, indica
+il risultato certo o il range determinabile dalle fonti e spiega quali elementi
+restano da assegnare, sempre citando i documenti usati.
+
 Se la domanda riguarda la sede, l’ufficio, la stanza o il laboratorio di un docente e 
 nel contesto sono presenti più locali associati a quel docente, non scrivere che 
 "l'ufficio si trova" in più luoghi e non scegliere un locale principale se non è 
@@ -772,15 +1143,35 @@ le attività didattiche, di ricerca, internazionali o i documenti ufficiali indi
 rispondi chiaramente: "La domanda è fuori dal contesto del DIEM."
 
 Rispondi in italiano, in modo chiaro e strutturato.
+Non includere ragionamento interno, analisi nascosta, testo in inglese o tag
+come <think>: restituisci solo la risposta finale nel JSON richiesto.
 
 Se la domanda chiede un elenco, ad esempio "quali sono", "elenca", "quali corsi", "quali docenti", "quali laboratori",
 rispondi preferibilmente con una breve frase introduttiva e poi con punti elenco.
+Se nel contesto trovi un elenco o una tabella ufficiale con molte voci pertinenti,
+riporta tutte le voci pertinenti presenti nel contesto: non limitarti alle prime
+voci, alle voci con descrizioni più lunghe o a esempi parziali.
 
 Per le domande sui corsi di laurea, lauree triennali, lauree magistrali o offerta formativa:
 - usa un elenco puntato;
 - inserisci nome del corso, codice/classe se presenti nel contesto;
 - non scrivere una risposta discorsiva lunga;
 - non aggiungere dettagli secondari, anni storici o informazioni non richieste.
+
+Per le domande su elenchi dipartimentali, strutture, laboratori o servizi:
+- se nel contesto sono presenti sia pagine ufficiali del dipartimento sia pagine personali
+  dei docenti, privilegia le pagine ufficiali del dipartimento per l'elenco complessivo;
+- usa le pagine personali solo quando la domanda riguarda esplicitamente un docente o
+  un dettaglio associato a quel docente.
+- per laboratori e strutture, se la fonte ufficiale contiene una tabella indice
+  e pagine di dettaglio, usa la tabella indice per decidere quali voci elencare;
+  aggiungi descrizioni dalle pagine di dettaglio solo se non causa omissioni.
+
+Per le domande sulle pubblicazioni di un docente:
+- usa le schede pubblicazione pertinenti al docente richiesto;
+- se sono presenti anno o ordine di pubblicazione nel contesto, elenca prima le
+  pubblicazioni più recenti;
+- non mescolare pubblicazioni di docenti diversi.
 
 Se il contesto contiene più dettagli utili e pertinenti alla domanda, includili nella risposta.
 Non aggiungere dettagli secondari, storici o non richiesti solo perché presenti nel contesto.
@@ -835,14 +1226,136 @@ RISPOSTA:
 """.strip()
 
 
+def exception_chain_text(error: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+
+    return " ".join(parts).lower()
+
+
+def is_payload_too_large_error(error: BaseException) -> bool:
+    text = exception_chain_text(error)
+    return any(
+        marker in text
+        for marker in (
+            "413",
+            "payload too large",
+            "request body too large",
+            "request entity too large",
+            "content too large",
+        )
+    )
+
+
+def groq_status_code(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status_code = getattr(current, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+
+        response = getattr(current, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+
+        current = current.__cause__ or current.__context__
+
+    text = exception_chain_text(error)
+    match = re.search(
+        r"\b(?:http/1\.1|error code:|status code:?|status=)\s*['\"]?(\d{3})\b",
+        text,
+    )
+    if match:
+        return int(match.group(1))
+
+    return None
+
+
+def is_bad_request_error(error: BaseException) -> bool:
+    return groq_status_code(error) == 400
+
+
+def is_rate_limit_error(error: BaseException) -> bool:
+    return groq_status_code(error) == 429
+
+
+def should_retry_groq_error(error: BaseException) -> bool:
+    status_code = groq_status_code(error)
+    if status_code in {400, 413, 429}:
+        return False
+    return not is_payload_too_large_error(error)
+
+
 @retry(
-    retry=retry_if_exception_type(Exception),
+    retry=retry_if_exception(should_retry_groq_error),
     stop=stop_after_attempt(GROQ_MAX_RETRIES),
     wait=wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,
 )
 def create_groq_completion(client: Groq, request_kwargs: dict[str, Any]):
     return client.chat.completions.create(**request_kwargs)
+
+
+def groq_model_supports_reasoning_controls(model: str) -> bool:
+    normalized_model = model.lower()
+    return any(
+        marker in normalized_model
+        for marker in ("qwen", "deepseek", "gpt-oss")
+    )
+
+
+def groq_reasoning_effort_for_model(model: str) -> str:
+    if GROQ_REASONING_EFFORT:
+        return GROQ_REASONING_EFFORT
+
+    return ""
+
+
+def build_groq_request_kwargs(
+    prompt: str,
+    model: str,
+    include_response_format: bool = True,
+    include_reasoning_controls: bool = True,
+) -> dict[str, Any]:
+    request_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "stream": False,
+        "timeout": GROQ_TIMEOUT_SECONDS,
+    }
+
+    if GROQ_MAX_COMPLETION_TOKENS > 0:
+        request_kwargs["max_completion_tokens"] = GROQ_MAX_COMPLETION_TOKENS
+
+    if include_reasoning_controls and groq_model_supports_reasoning_controls(model):
+        if GROQ_REASONING_FORMAT in {"hidden", "parsed", "raw"}:
+            request_kwargs["reasoning_format"] = GROQ_REASONING_FORMAT
+
+        reasoning_effort = groq_reasoning_effort_for_model(model)
+        if reasoning_effort:
+            request_kwargs["reasoning_effort"] = reasoning_effort
+
+    if include_response_format and GROQ_JSON_MODE:
+        request_kwargs["response_format"] = {"type": "json_object"}
+
+    return request_kwargs
 
 
 def call_groq(
@@ -861,36 +1374,52 @@ def call_groq(
             "Aggiungila nel file .env, ad esempio: GROQ_API_KEY=gsk_..."
         )
 
-    client = Groq(api_key=api_key)
-    request_kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        "temperature": 0.1,
-        "top_p": 0.9,
-        "stream": False,
-        "timeout": GROQ_TIMEOUT_SECONDS,
-    }
-
-    if GROQ_JSON_MODE:
-        request_kwargs["response_format"] = {"type": "json_object"}
+    client = Groq(api_key=api_key, max_retries=GROQ_SDK_MAX_RETRIES)
+    request_kwargs = build_groq_request_kwargs(prompt=prompt, model=model)
 
     try:
         completion = create_groq_completion(client, request_kwargs)
     except Exception as exc:
-        if "response_format" in request_kwargs:
-            request_kwargs.pop("response_format", None)
+        if is_payload_too_large_error(exc):
+            raise GroqPayloadTooLargeError(
+                "La richiesta inviata a Groq è troppo grande."
+            ) from exc
+
+        if is_bad_request_error(exc) and "response_format" in request_kwargs:
+            fallback_kwargs = dict(request_kwargs)
+            fallback_kwargs.pop("response_format", None)
             try:
-                completion = create_groq_completion(client, request_kwargs)
+                completion = create_groq_completion(client, fallback_kwargs)
             except Exception as fallback_exc:
-                raise RuntimeError(
-                    "Non riesco a contattare Groq in questo momento. "
-                    "Riprova tra poco."
-                ) from fallback_exc
+                if is_payload_too_large_error(fallback_exc):
+                    raise GroqPayloadTooLargeError(
+                        "La richiesta inviata a Groq è troppo grande."
+                    ) from fallback_exc
+
+                if is_bad_request_error(fallback_exc) and (
+                    "reasoning_format" in fallback_kwargs
+                    or "reasoning_effort" in fallback_kwargs
+                ):
+                    minimal_kwargs = dict(fallback_kwargs)
+                    minimal_kwargs.pop("reasoning_format", None)
+                    minimal_kwargs.pop("reasoning_effort", None)
+                    try:
+                        completion = create_groq_completion(client, minimal_kwargs)
+                    except Exception as minimal_exc:
+                        raise RuntimeError(
+                            "Non riesco a contattare Groq in questo momento. "
+                            "Riprova tra poco."
+                        ) from minimal_exc
+                else:
+                    raise RuntimeError(
+                        "Non riesco a contattare Groq in questo momento. "
+                        "Riprova tra poco."
+                    ) from fallback_exc
+        elif is_rate_limit_error(exc):
+            raise RuntimeError(
+                "Groq ha restituito un limite di traffico temporaneo. "
+                "Riprova tra poco."
+            ) from exc
         else:
             raise RuntimeError(
                 "Non riesco a contattare Groq in questo momento. "
@@ -902,22 +1431,159 @@ def call_groq(
     if not answer:
         raise RuntimeError("Groq ha restituito una risposta vuota.")
 
-    return strip_model_thinking(answer)
+    clean_answer = strip_model_thinking(answer)
+    if not clean_answer:
+        raise GroqReasoningOnlyError(
+            "Groq ha restituito solo testo di ragionamento, senza risposta finale."
+        )
+
+    return clean_answer
+
+
+def adaptive_context_budgets(max_context_chars: int) -> list[int]:
+    base = max(1200, max_context_chars)
+    minimum = max(1200, min(base, RAG_MIN_CONTEXT_CHARS_ON_PAYLOAD_RETRY))
+    candidates = [
+        base,
+        int(base * 0.75),
+        int(base * 0.55),
+        int(base * 0.38),
+        minimum,
+    ]
+
+    budgets: list[int] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        budget = max(minimum, min(base, candidate))
+        if budget not in seen:
+            seen.add(budget)
+            budgets.append(budget)
+
+    return budgets
+
+
+def conversation_context_for_payload_retry(
+    conversation_context: str,
+    attempt_index: int,
+) -> str:
+    if attempt_index <= 0 or not conversation_context.strip():
+        return conversation_context
+
+    retry_limits = (1800, 1200, 800, 500)
+    limit = retry_limits[min(attempt_index - 1, len(retry_limits) - 1)]
+    return truncate_text(conversation_context, limit)
+
+
+def call_groq_with_adaptive_context(
+    question: str,
+    retrieved_chunks: list[RetrievalResult],
+    conversation_context: str,
+    max_context_chars: int,
+    model: str,
+) -> tuple[str, dict[str, Any]]:
+    payload_error: GroqPayloadTooLargeError | None = None
+    reasoning_error: GroqReasoningOnlyError | None = None
+    budgets = adaptive_context_budgets(max_context_chars)
+    prefer_relevance_compaction = question_prefers_relevance_compaction(question)
+    attempts: list[dict[str, Any]] = []
+
+    for attempt_index, budget in enumerate(budgets):
+        if attempt_index == 0:
+            context = build_context(
+                results=retrieved_chunks,
+                max_context_chars=budget,
+            )
+            context_mode = "full"
+        else:
+            if prefer_relevance_compaction:
+                context = build_relevance_compacted_context(
+                    question=question,
+                    results=retrieved_chunks,
+                    max_context_chars=budget,
+                )
+                context_mode = "relevance_compacted"
+            else:
+                context = build_context(
+                    results=retrieved_chunks,
+                    max_context_chars=budget,
+                )
+                context_mode = "full"
+        compact_conversation_context = conversation_context_for_payload_retry(
+            conversation_context=conversation_context,
+            attempt_index=attempt_index,
+        )
+        prompt = build_prompt(
+            question=question,
+            context=context,
+            conversation_context=compact_conversation_context,
+        )
+        attempt_trace = {
+            "context_budget_chars": budget,
+            "context_mode": context_mode,
+            "context_chars": len(context),
+            "conversation_context_chars": len(compact_conversation_context),
+            "prompt_chars": len(prompt),
+        }
+
+        try:
+            answer = call_groq(prompt=prompt, model=model)
+        except GroqPayloadTooLargeError as exc:
+            payload_error = exc
+            attempt_trace["status"] = "payload_too_large"
+            attempts.append(attempt_trace)
+            continue
+        except GroqReasoningOnlyError as exc:
+            reasoning_error = exc
+            attempt_trace["status"] = "reasoning_only"
+            attempts.append(attempt_trace)
+            continue
+
+        attempt_trace["status"] = "ok"
+        attempts.append(attempt_trace)
+        return answer, {
+            "adaptive_context": True,
+            "attempts": attempts,
+            "selected_attempt": attempt_index + 1,
+        }
+
+    if reasoning_error is not None:
+        raise RuntimeError(
+            "Groq ha restituito solo testo di ragionamento anche dopo i retry "
+            "automatici."
+        ) from reasoning_error
+
+    raise RuntimeError(
+        "La richiesta verso Groq resta troppo grande anche dopo la riduzione "
+        "automatica del contesto."
+    ) from payload_error
 
 
 def strip_model_thinking(answer: str) -> str:
     """
     Rimuove i blocchi di ragionamento che alcuni modelli reasoning, come Qwen3,
-    possono restituire nel formato <think>...</think>.
+    possono restituire nel formato <think>...</think>. Gestisce anche risposte
+    troncate in cui il tag di chiusura non arriva.
     """
-    without_thinking = re.sub(
+    text = re.sub(
         r"<think>.*?</think>",
         "",
         answer,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    text = re.sub(
+        r"^.*?</think>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"<think>.*$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
-    return without_thinking.strip()
+    return text.strip()
 
 
 def format_sources(sources: list[Source]) -> str:
@@ -970,7 +1636,7 @@ def parse_model_answer(answer: str) -> tuple[str, list[int]]:
     Interpreta prima il JSON mode; se il modello non lo rispetta, usa il
     vecchio formato FONTI_USATE per compatibilità.
     """
-    stripped_answer = answer.strip()
+    stripped_answer = strip_model_thinking(answer).strip()
 
     try:
         payload = json.loads(stripped_answer)
@@ -1390,6 +2056,25 @@ def publication_order(result: RetrievalResult) -> int:
         return 999_999
 
 
+def publication_sort_key(result: RetrievalResult) -> tuple[int, int, str]:
+    metadata = result.metadata or {}
+    title = metadata_to_string(metadata.get("publication_title")).lower()
+    return (
+        -publication_year(result),
+        publication_order(result),
+        title,
+    )
+
+
+def sort_publication_results(results: list[RetrievalResult]) -> list[RetrievalResult]:
+    sorted_results = sorted(results, key=publication_sort_key)
+
+    for rank, result in enumerate(sorted_results, start=1):
+        result.rank = rank
+
+    return sorted_results
+
+
 def find_teacher_publication_summaries(question: str, limit: int = 7) -> list[RetrievalResult]:
     teacher_tokens = teacher_tokens_from_question(question)
     if not teacher_tokens:
@@ -1427,18 +2112,7 @@ def find_teacher_publication_summaries(question: str, limit: int = 7) -> list[Re
         )
         matches.append(result)
 
-    matches.sort(
-        key=lambda result: (
-            publication_year(result),
-            -publication_order(result),
-        ),
-        reverse=True,
-    )
-
-    for rank, result in enumerate(matches, start=1):
-        result.rank = rank
-
-    return matches[:limit]
+    return sort_publication_results(matches)[:limit]
 
 
 def publication_year_from_metadata(metadata: dict[str, Any]) -> int:
@@ -1502,14 +2176,9 @@ def build_direct_publications_answer(
         ]
 
         if pub_summaries_local:
-            candidate_results = pub_summaries_local
+            candidate_results = sort_publication_results(pub_summaries_local)
         else:
-            # Fallback: se non abbiamo summaries fra i risultati passati,
-            # proviamo a cercare nel corpus strutturato come ultima risorsa.
-            pub_summaries = find_teacher_publication_summaries(
-                question, limit=len(matched_results) or 7
-            )
-            candidate_results = pub_summaries if pub_summaries else matched_results
+            candidate_results = sort_publication_results(matched_results)
 
     first_metadata = candidate_results[0].metadata or {}
     first_source = get_source_from_result(candidate_results[0])
@@ -1557,6 +2226,61 @@ def build_direct_publications_answer(
         return None
 
     return "\n".join(lines)
+
+
+def sort_retrieved_chunks_for_generation(
+    question: str,
+    results: list[RetrievalResult],
+) -> list[RetrievalResult]:
+    """
+    Riordina solo il contesto fornito all'LLM, senza generare risposte
+    estrattive. Per le pubblicazioni mette davanti le schede strutturate del
+    docente richiesto già recuperate dall'hybrid retrieval, ordinate dal più
+    recente.
+    """
+    if not is_teacher_publications_query(question):
+        return results
+
+    teacher_tokens = teacher_tokens_from_question(question)
+    if not teacher_tokens:
+        return results
+
+    publication_results: list[RetrievalResult] = []
+    other_results: list[RetrievalResult] = []
+
+    for result in results:
+        metadata = result.metadata or {}
+        is_publication_summary = metadata.get("chunk_kind") == "publication_summary"
+        metadata_text = " ".join(
+            metadata_to_string(metadata.get(key))
+            for key in [
+                "title",
+                "breadcrumb",
+                "breadcrumb_text",
+                "entity_name",
+                "source_url",
+                "document_url",
+                "publication_title",
+                "publication_authors",
+            ]
+        ).lower()
+
+        if (
+            is_publication_summary
+            and teacher_metadata_matches(teacher_tokens, simple_tokenize(metadata_text))
+        ):
+            publication_results.append(result)
+        else:
+            other_results.append(result)
+
+    if not publication_results:
+        return results
+
+    ordered_results = sort_publication_results(publication_results) + other_results
+    for rank, result in enumerate(ordered_results, start=1):
+        result.rank = rank
+
+    return ordered_results
 
 
 def is_office_hours_query(question: str) -> bool:
@@ -1748,7 +2472,6 @@ def clean_markdown_text(text: str) -> str:
     return " ".join(text.split())
 
 
-
 def recent_context_was_publications(conversation_history: list[ConversationTurn] | None) -> bool:
     """
     Capisce se negli ultimi turni si parlava di pubblicazioni.
@@ -1935,9 +2658,9 @@ def get_dynamic_context_params(complexity: str) -> tuple[int, int]:
         (final_k, max_context_chars)
     """
     params = {
-        'simple': (5, 6000),
-        'medium': (10, 12000),
-        'complex': (14, 16000),
+        'simple': (4, 4500),
+        'medium': (8, 7000),
+        'complex': (10, 9000),
     }
     return params.get(complexity, (DEFAULT_FINAL_K, DEFAULT_MAX_CONTEXT_CHARS))
 
@@ -2042,63 +2765,6 @@ def answer_question(
             trace=retrieval_trace,
         )
 
-    # Le risposte estrattive restano post-processing sulle evidenze recuperate:
-    # non bypassano più il retrieval principale, quindi se falliscono si passa
-    # comunque alla generazione con contesto.
-    direct_publications_answer = build_direct_publications_answer(
-        question=retrieval_question,
-        results=retrieved_chunks,
-    )
-
-    if direct_publications_answer:
-        return RagResponse(
-            question=question,
-            answer=direct_publications_answer,
-            sources=build_sources([
-                result
-                for result in retrieved_chunks
-                if teacher_metadata_matches(
-                    teacher_tokens_from_question(retrieval_question),
-                    simple_tokenize(
-                        " ".join(
-                            metadata_to_string(result.metadata.get(key))
-                            for key in [
-                                "title",
-                                "breadcrumb",
-                                "breadcrumb_text",
-                                "entity_name",
-                                "source_url",
-                                "document_url",
-                                "publication_title",
-                            ]
-                        ).lower()
-                    ),
-                )
-            ]),
-            retrieved_chunks=[
-                result
-                for result in retrieved_chunks
-                if teacher_metadata_matches(
-                    teacher_tokens_from_question(retrieval_question),
-                    simple_tokenize(
-                        " ".join(
-                            metadata_to_string(result.metadata.get(key))
-                            for key in [
-                                "title",
-                                "breadcrumb",
-                                "breadcrumb_text",
-                                "entity_name",
-                                "source_url",
-                                "document_url",
-                                "publication_title",
-                            ]
-                        ).lower()
-                    ),
-                )
-            ],
-            trace=retrieval_trace,
-        )
-        
     # Se la domanda riguarda l'orario di ricevimento di un docente specifico
     # ma non siamo riusciti a estrarre la tabella, non passiamo al modello generativo:
     # meglio evitare risposte inventate o errori di memoria.
@@ -2116,9 +2782,9 @@ def answer_question(
             trace=retrieval_trace,
         )
 
-    context = build_context(
+    retrieved_chunks = sort_retrieved_chunks_for_generation(
+        question=retrieval_question,
         results=retrieved_chunks,
-        max_context_chars=max_context_chars,
     )
 
     conversation_context = ""
@@ -2129,16 +2795,15 @@ def answer_question(
             original_question=question,
         )
 
-    prompt = build_prompt(
+    raw_answer, generation_trace = call_groq_with_adaptive_context(
         question=question,
-        context=context,
+        retrieved_chunks=retrieved_chunks,
         conversation_context=conversation_context,
-    )
-
-    raw_answer = call_groq(
-        prompt=prompt,
+        max_context_chars=max_context_chars,
         model=model,
     )
+    if retrieval_trace is not None:
+        retrieval_trace["generation"] = generation_trace
 
     clean_answer, used_source_indexes = parse_model_answer(raw_answer)
 

@@ -2,7 +2,35 @@ import json
 import os
 import sys
 import re
+import types
 from pathlib import Path
+
+
+def install_ragas_vertexai_compat_shim() -> None:
+    """
+    RAGAS 0.4.x importa ChatVertexAI dal vecchio namespace
+    langchain_community.chat_models.vertexai anche quando si usa un judge OpenAI.
+    Le versioni recenti di langchain-community non espongono piu quel modulo.
+    """
+    module_name = "langchain_community.chat_models.vertexai"
+    if module_name in sys.modules:
+        return
+
+    shim = types.ModuleType(module_name)
+
+    class ChatVertexAI:  # pragma: no cover - compatibilità per import opzionale
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "ChatVertexAI non è disponibile. Questa evaluation usa il judge "
+                "OpenAI/Groq, quindi VertexAI non dovrebbe essere istanziato."
+            )
+
+    shim.ChatVertexAI = ChatVertexAI
+    sys.modules[module_name] = shim
+
+
+install_ragas_vertexai_compat_shim()
+
 from ragas.run_config import RunConfig
 
 import pandas as pd
@@ -19,9 +47,8 @@ from rag_chain import answer_question  # noqa: E402
 from openai import OpenAI
 from ragas.llms import llm_factory
 
-from langchain_huggingface import HuggingFaceEmbeddings
-
 from ragas import EvaluationDataset, evaluate
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from ragas.metrics import (
     ContextPrecision,

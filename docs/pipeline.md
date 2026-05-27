@@ -604,8 +604,10 @@ Le variabili principali sono configurate tramite `.env`:
 GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=qwen/qwen3-32b
 GROQ_TIMEOUT_SECONDS=60
+GROQ_MAX_COMPLETION_TOKENS=1024
 RAG_FINAL_K=7
 RAG_MAX_CONTEXT_CHARS=9000
+RAG_CONTEXTUALIZER_MAX_COMPLETION_TOKENS=256
 ```
 
 Questa fase completa la pipeline RAG end-to-end: i chunk recuperati dal retrieval ibrido vengono usati come contesto per generare una risposta controllata e accompagnata dalle fonti.

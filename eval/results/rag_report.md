@@ -2,9 +2,9 @@
 
 ## Summary
 
-- `context_precision`: 0.6667
-- `context_recall`: 0.6667
-- `answer_relevancy`: 0.8687
+- `context_precision`: nan
+- `context_recall`: nan
+- `answer_relevancy`: nan
 
 ## Interpretazione
 

@@ -29,6 +29,21 @@ TASK_TYPES = {
 }
 
 
+FINAL_EXAM_GRADE_MARKERS = (
+    "voto di laurea",
+    "voto laurea",
+    "voto finale di laurea",
+    "voto finale laurea",
+    "voto dell esame finale",
+    "voto esame finale",
+    "esame finale",
+    "valutazione conclusiva",
+    "media voto",
+    "media voti",
+    "media esami",
+)
+
+
 def normalize_query(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(char for char in text if not unicodedata.combining(char))
@@ -75,6 +90,14 @@ def extract_course_hint(text: str) -> str:
     for marker in course_markers:
         if marker in text:
             return marker
+    return ""
+
+
+def extract_course_level(text: str) -> str:
+    if contains_any(text, ("magistrale", "laurea magistrale", "lm-")):
+        return "magistrale"
+    if contains_any(text, ("triennale", "laurea triennale", "classe l-")):
+        return "triennale"
     return ""
 
 
@@ -155,6 +178,17 @@ def build_retrieval_query(query: str, plan: QueryPlan) -> str:
     if plan.task_type == "teacher_publications":
         terms.extend(["pubblicazioni", "produzione scientifica", "articoli"])
 
+    if contains_any(normalized_query, FINAL_EXAM_GRADE_MARKERS):
+        terms.extend([
+            "regolamento esame finale lauree magistrali",
+            "attribuzione voto esame finale",
+            "voto base media pesata crediti",
+            "valutazione conclusiva centodecimi",
+        ])
+
+    if plan.task_type == "lab_equipment":
+        terms.extend(["dipartimento strutture laboratori", "laboratori DIEM", "strutture DIEM"])
+
     if plan.task_type in {"study_plan", "course_catalog"} and contains_any(
         normalized_query,
         (
@@ -197,6 +231,8 @@ def infer_task_type(text: str) -> tuple[str, float, str]:
     # Heuristiche ad alto segnale: non sono intent esclusivi e non bloccano la
     # pipeline. Il valore di confidence serve solo a capire quanto fidarsi per
     # operazioni come pinning di evidenze strutturate.
+    if contains_any(text, FINAL_EXAM_GRADE_MARKERS):
+        return "official_docs", 0.82, "query su regolamento dell'esame finale e voto di laurea"
     if contains_any(text, ("piano di studi", "piano degli studi", "esame", "esami", "insegnamenti", "cfu", "curriculum")):
         return "study_plan", 0.78, "query didattica con segnali di piano di studi/insegnamenti"
     if "anno" in text and contains_any(text, ("primo", "secondo", "terzo", "1 anno", "2 anno", "3 anno")) and "ingegneria" in text:
@@ -230,6 +266,7 @@ def plan_query(query: str) -> QueryPlan:
     course_years = extract_course_years(normalized)
     academic_years = extract_years(normalized)
     course_hint = extract_course_hint(normalized)
+    course_level = extract_course_level(normalized)
     teacher_hint = extract_teacher_hint(query, normalized)
 
     list_markers = (
@@ -247,7 +284,24 @@ def plan_query(query: str) -> QueryPlan:
     )
     # Le query di elenco o multi-anno hanno bisogno di più chunk dalla stessa
     # fonte; questo flag allenta la deduplica per URL più avanti nel retrieval.
-    requires_complete_answer = contains_any(normalized, list_markers) or len(course_years) >= 2
+    lab_list_query = task_type == "lab_equipment" and contains_any(
+        normalized,
+        (
+            "che laboratori",
+            "quali laboratori",
+            "laboratori possiede",
+            "laboratori ha",
+            "elenco laboratori",
+            "lista laboratori",
+            "strutture del diem",
+            "strutture possiede",
+        ),
+    )
+    requires_complete_answer = (
+        contains_any(normalized, list_markers)
+        or len(course_years) >= 2
+        or lab_list_query
+    )
 
     entities: dict[str, object] = {}
     filters: dict[str, object] = {}
@@ -258,6 +312,8 @@ def plan_query(query: str) -> QueryPlan:
         entities["teacher"] = teacher_hint
     if course_years:
         filters["course_years"] = course_years
+    if course_level:
+        filters["course_level"] = course_level
     if academic_years:
         filters["years"] = academic_years
 
